@@ -130,6 +130,31 @@ class StockZooMortality:
         return self.m.sum(((population ** exponent) * rate) * recycling)
 
 
+
+@xso.component
+class StockZooMortality_simpleinput:
+    """Linear Zoplankton Mortality Flux."""
+    population = xso.variable(dims='zoo', foreign=True, flux='mortality', negative=True, description='variable affected by flux')
+    nutrient = xso.variable(foreign=True, flux='recycled_mortality', negative=False, description='recycled mortality to nutrient')
+    
+    rate = xso.parameter(description='linear rate of mortality')
+    exponent = xso.parameter(dims='zoo', description='allows for conditional quadratic mortality')
+    recycling = xso.parameter(dims='zoo', description='amount of mortality going to nutrient')
+    
+    @xso.flux(dims='zoo')
+    def mortality(self, population, nutrient, rate, exponent, recycling):
+        """Linear or quadratic decay function."""
+        rate_ext = np.array([0,0,0,rate[0]])
+        return (population ** exponent) * rate_ext
+
+    @xso.flux
+    def recycled_mortality(self, population, nutrient, rate, exponent, recycling):
+        """Linear or quadratic decay function."""
+        return self.m.sum(((population ** exponent) * rate) * recycling)
+
+
+        
+
 @xso.component
 class StockGrazingMatrix:
     """Size-based grazing function, adapted from Banas et al. (2011).
