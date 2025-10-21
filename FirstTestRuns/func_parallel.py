@@ -111,6 +111,32 @@ model_setup = xso.setup(solver='solve_ivp', model=model,
                 'N0':{'forcing_label':'N0', 'value':nutrient_input},
         })
 
+model_setup_fs = xso.setup(solver='fsolve', model=model,
+        time=[0,1],
+        input_vars={
+                # State variables
+                'Nutrient':{'value_label':'N','value_init':1.0},
+                'Phytoplankton':{'biomass_label':'P','biomass_init':phyto_init, 'phyto_index':phyto_sizes},
+             
+                'Zooplankton':{'biomass_label':'Z','biomass_init':zoo_init, 'zoo_index': zoo_sizes},
+            
+                # Flows:
+                'Inflow':{'forcing':'N0', 'rate':1., 'var':'N'},
+            
+                # Growth
+                'Growth':{'resource':'N', 'consumer':'P', 'halfsat':phyto_ks, 'mu_max':phyto_mu0},
+
+                # Grazing
+                'Grazing':{'resource':'P', 'consumer':'Z', 'Imax':zoo_imax, 'KsZ':zoo_Ki, 'phiPZ':zoo_prey_avail},
+                'GGE':{'grazed_phyto':'P', 'grazed_zoo':'Z', 'assimilated_consumer':'Z', 'egested_detritus':'N', 
+                       'R':zoo_frac_excreted, 'alpha':zoo_frac_assim, 'f_I':zoo_frac_egest_recycled, 'gge':zoo_gge},
+            
+                # Mortality
+                'PhytoMortality':{'population':'P', 'nutrient':'N', 'rate':phyto_mortality, 'exponent':phyto_mort_exponent, 'recycling':phyto_recycling},
+                'HigherOrderMortality':{'population':'Z', 'nutrient':'N', 'rate':zoo_higherordermortality, 'exponent':zoo_mort_exponent, 'recycling':zoo_frac_mortylity_recycled},
+ # Forcings
+                'N0':{'forcing_label':'N0', 'value':nutrient_input},
+        })
 
 
 def run_model_test(i):
