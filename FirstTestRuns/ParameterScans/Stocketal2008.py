@@ -10,7 +10,7 @@ import xso
 from Stocketal2008_comps import (Nutrient, PhytoSizeSpectrum, ZooSizeSpectrum, 
     ConstantExternalNutrient, LinearForcingInput, 
     MonodGrowth_SizeBased, StockGrazingMatrix, Stock_GGE_MatrixGrazing, 
-    StockPhytoMortality, StockZooMortality_simpleinput)
+    StockPhytoMortality, StockZooMortality_simpleinput, StockZooMortality)
 
 # --- Parameters (Picklable Primitives) ---
 P_num = 3
@@ -34,7 +34,7 @@ zoo_prey_avail = np.array([[1, 0, 0, 0, 0, 0, 0],
                            [0, 0, 1, 0, 1, 0, 0], 
                            [0, 0, 0, 0, 0, 1, 0]])
 zoo_frac_egest_recycled = [1, 1, 0, 0]
-zoo_higherordermortality = 0.0093
+zoo_higherordermortality = [0,0,0,0.0093]
 zoo_mort_exponent = [0, 0, 0, 1]
 zoo_frac_mortylity_recycled = [0, 0, 0, 0.5]
 nutrient_input = 0.0053
@@ -67,12 +67,19 @@ model = xso.create({
     'Nutrient': Nutrient, 'Phytoplankton': PhytoSizeSpectrum, 'Zooplankton': ZooSizeSpectrum,
     'Inflow': LinearForcingInput, 'Growth': MonodGrowth_SizeBased, 'Grazing': StockGrazingMatrix, 
     'GGE': Stock_GGE_MatrixGrazing, 'PhytoMortality': StockPhytoMortality, 
-    'HigherOrderMortality': StockZooMortality_simpleinput, 'N0': ConstantExternalNutrient,
+    'HigherOrderMortality': StockZooMortality, 'N0': ConstantExternalNutrient,
 })
         
-model_setup = xso.setup(
-    solver='solve_ivp', 
+model_setup_stability = xso.setup(
+    solver='stability', 
     model=model,
-    time=np.arange(0, 5000),
+    time=[0,1],
+    input_vars=BASE_INPUT_VARS
+)
+
+model_setup_ivp = xso.setup(
+    solver='stability', 
+    model=model,
+    time=[0,1],
     input_vars=BASE_INPUT_VARS
 )

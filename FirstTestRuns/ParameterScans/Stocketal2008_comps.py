@@ -179,11 +179,14 @@ class StockGrazingMatrix:
     @xso.flux(group='graze_matrix', dims=('full', 'zoo'))
     def grazing(self, resource, consumer, phiPZ, Imax, KsZ):
         """Here we are using a matrix calculation, to define the pair-wise interaction."""
-        biomass = np.concatenate((resource, consumer))
+        biomass = self.m.concatenate((resource, consumer))
+        
         graz_pref = phiPZ.T * (np.transpose((biomass * phiPZ)**2)/self.m.sum((biomass * phiPZ)**2, axis=1))**0.5
-
+ 
         BMscaledAsFood = np.transpose(biomass * graz_pref.T)
+
         FgrazP = Imax * BMscaledAsFood / (KsZ + self.m.sum(BMscaledAsFood, axis=0))
+
         return FgrazP * consumer
 
 
