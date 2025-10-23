@@ -78,8 +78,8 @@ model_setup_stability = xso.setup(
 )
 
 model_setup_ivp = xso.setup(
-    solver='stability', 
+    solver='solve_ivp', 
     model=model,
-    time=[0,1],
+    time=np.arange(0,5000),
     input_vars=BASE_INPUT_VARS
 )
