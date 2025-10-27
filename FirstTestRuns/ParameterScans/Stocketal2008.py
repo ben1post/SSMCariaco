@@ -37,7 +37,7 @@ zoo_frac_egest_recycled = [1, 1, 0, 0]
 zoo_higherordermortality = [0,0,0,0.0093]
 zoo_mort_exponent = [0, 0, 0, 1]
 zoo_frac_mortylity_recycled = [0, 0, 0, 0.5]
-nutrient_input = 0.0053
+nutrient_input = 0.00325
 
 # 💡 BASE_INPUT_VARS: Complete set of fixed inputs.
 BASE_INPUT_VARS = {
