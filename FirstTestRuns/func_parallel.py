@@ -111,7 +111,7 @@ model_setup = xso.setup(solver='solve_ivp', model=model,
                 'N0':{'forcing_label':'N0', 'value':nutrient_input},
         })
 
-model_setup_fs = xso.setup(solver='fsolve', model=model,
+model_setup_fs = xso.setup(solver='stability', model=model,
         time=[0,1],
         input_vars={
                 # State variables
@@ -142,6 +142,15 @@ model_setup_fs = xso.setup(solver='fsolve', model=model,
 def run_model_test(i):
     with model:
         model_out = model_setup.xsimlab.update_vars(input_vars=i).xsimlab.run()
+        
+    # solve ivp introduces rounding errors for time, which mess up combining datasets later: hence rounding
+    model_out['time']= model_out.time.round(9)
+    return model_out
+
+
+def run_model_test_stability(i):
+    with model:
+        model_out = model_setup_fs.xsimlab.update_vars(input_vars=i).xsimlab.run()
         
     # solve ivp introduces rounding errors for time, which mess up combining datasets later: hence rounding
     model_out['time']= model_out.time.round(9)
