@@ -20,6 +20,16 @@ from npxzxf_comps import (
     FishGrazing_Kernel,
 )
 
+# Imports
+from npdxzxf_comps_detritus import (
+    Detritus,
+    GGE_Full_SizeDep_withD,
+    PhytoMortality_toD_toN,
+    ZooQuadraticMortality_toD,
+    DetritusRemineralization,
+    DetritusSinking,
+)
+
 
 # =============================================================================
 # ALLOMETRIC FUNCTIONS (copied from npxzxf_models.py)
@@ -267,23 +277,40 @@ N0_cariaco       = 5.5564
 dilution_cariaco = 0.016786
 
 
+# Parameters for Detritus
+D_init = 0.01                  # mmol N m-3
+f_egest_D_zoo = 0.75           # Fasham: 75% egesta to D, 25% sloppy to N
+f_mort_D_phyto = 0.9           # Fasham-style: most mortality to D
+f_mort_D_zoo = 0.5             # Stock-style: half to D, half exported
+k_remin = 0.1                  # d-1, warm tropical
+d_e = 50.0                     # m, surface box depth
+w_sink = 5.0                   # m d-1, bulk detritus sinking
+sinking_rate = w_sink / d_e    # d-1
+
+
 # =============================================================================
 # BUILD MODEL
 # =============================================================================
+# Model dict
 model = xso.create({
     'Nutrient':       Nutrient,
     'Phytoplankton':  PhytoSizeSpectrum,
     'Zooplankton':    ZooSizeSpectrum,
+    'Detritus':       Detritus,
     'N0':             ConstantExternalNutrient,
     'Inflow':         LinearForcingInput,
     'Growth':         MonodGrowth_SizeBased,
     'Grazing':        SizebasedGrazingMatrix_Full_TypeIII,
-    'GGE':            GGE_Full_SizeDep,
-    'PhytoMortality': PhytoMortality_toN,
-    'ZooMortality':   ZooQuadraticMortality,
+    'GGE':            GGE_Full_SizeDep_withD,
+    'PhytoMortality': PhytoMortality_toD_toN,
+    'ZooMortality':   ZooQuadraticMortality_toD,
+    'DetritusRemin':  DetritusRemineralization,
+    'DetritusSink':   DetritusSinking,
     'FishForcing':    ConstantFishForcing,
     'FishGrazing':    FishGrazing_Kernel,
 })
+
+
 
 # =============================================================================
 # INPUT DICTIONARY
@@ -294,24 +321,30 @@ input_vars = {
                       'phyto_index': phyto_esd.tolist()},
     'Zooplankton':   {'biomass_label': 'Z', 'biomass_init': zoo_init,
                       'zoo_index': zoo_esd.tolist()},
+    'Detritus': {'value_label': 'D', 'value_init': D_init},
     'N0':     {'forcing_label': 'N0', 'value': N0_cariaco},
     'Inflow': {'forcing': 'N0', 'rate': dilution_cariaco, 'var': 'N'},
     'Growth': {'resource': 'N', 'consumer': 'P',
                'halfsat': K_s, 'mu_max': mu_max},
     'Grazing': {'resource': 'P', 'consumer': 'Z',
                 'phiPZ': phiPZ, 'Imax': I_max, 'KsZ': KsZ},
-    'GGE':     {'grazed_phyto': 'P', 'grazed_zoo': 'Z',
-                'assimilated_consumer': 'Z', 'recycled_nutrient': 'N',
-                'gge': gge},
-    'PhytoMortality': {'population': 'P', 'nutrient': 'N',
-                       'rate': m_P, 'recycle_frac': m_P_recycled},
-    'ZooMortality':   {'population': 'Z', 'rate': m_Z},
+    'GGE': {'grazed_phyto': 'P', 'grazed_zoo': 'Z',
+            'assimilated_consumer': 'Z',
+            'egested_detritus': 'D',
+            'excreted_nutrient': 'N',
+            'gge': gge, 'f_egest_D': f_egest_D_zoo},
+    'PhytoMortality': {'population': 'P', 'detritus': 'D', 'nutrient': 'N',
+                       'rate': m_P, 'f_mort_D': f_mort_D_phyto},
+    'ZooMortality': {'population': 'Z', 'detritus': 'D',
+                     'rate': m_Z, 'f_mort_D': f_mort_D_zoo},
     'FishForcing': {'forcing_label': 'F_forcing', 'value': fish_biomass},
     'FishGrazing': {'phyto': 'P', 'zoo': 'Z',
                 'fish_forcing': 'F_forcing',
                 'kernel_P': kernel_P_fish,
                 'kernel_Z': kernel_Z_fish,
                 'rate': fish_rate},
+    'DetritusRemin': {'detritus': 'D', 'nutrient': 'N', 'k_remin': k_remin},
+    'DetritusSink':  {'detritus': 'D', 'sinking_rate': sinking_rate},
 }
 
 # =============================================================================
