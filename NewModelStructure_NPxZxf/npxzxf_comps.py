@@ -372,3 +372,68 @@ class FishGrazing_SizeBased:
     @xso.flux(dims='zoo')
     def fish_graze_zoo(self, phyto, zoo, fish_forcing, w_P, w_Z, rate):
         return w_Z * rate * fish_forcing * zoo
+
+
+# =============================================================================
+# FISH GRAZING — LOG-NORMAL KERNEL IN ESD SPACE (Option A)
+# =============================================================================
+
+@xso.component
+class FishGrazing_Kernel:
+    """Sardine grazing as external forcing with a log-normal size kernel.
+
+    Imposes a size-selective mortality on P and Z of the form
+
+        μ_S(D', t) = rate * F(t) * K(D') * B(D')
+
+    where F(t) is the prescribed fish biomass forcing, B(D') is the prey
+    biomass in the size class with ESD D', and K(D') is a log-normal
+    selectivity kernel in log10(ESD) space (precomputed via
+    compute_fish_kernel_lognormal and passed as kernel_P / kernel_Z).
+
+    The kernel is normalized to peak = 1 at D_pref, so `rate` retains its
+    meaning as the maximum mass-specific grazing rate per unit fish biomass
+    (units: [fish biomass]^-1 d^-1) imposed on prey at the preferred size.
+
+    Grazed material leaves the system entirely (locked into fish stock,
+    eventually exported as catch). To recycle a fraction to N, model this
+    on FishGrazingForced.
+
+    # References:
+    # - Log-normal size-selection kernel: Ursin (1973), as used in
+    #   Andersen & Pedersen (2010, Eq. M2) and Heneghan et al. (2016, Eq. E4).
+    # - Kernel formulated in log10(ESD) space following the plankton
+    #   size-spectrum convention of Banas (2011).
+    # - Use of a broad kernel (rather than narrow β~100, σ~1 typical of
+    #   generic fish) reflects sardine-specific filter-feeding biology:
+    #   sardines retain the capacity to feed on prey across ~2 decades of
+    #   ESD, from <20 µm up to ~2 mm (van der Lingen 1994; van der Lingen
+    #   et al. 2006; Rykaczewski 2019). The planktivore-specific broadened
+    #   kernel approach follows Andrades (2012, Ch. 3, Eqs. 3.12–3.13).
+    # - External-forcing (F(t) · K(D')) closure structure follows the
+    #   standard size-selective predation closure used in plankton
+    #   size-spectrum models (e.g. Stock et al. 2008; Banas 2011).
+    """
+    phyto = xso.variable(dims='phyto', foreign=True,
+                         flux='fish_graze_phyto', negative=True)
+    zoo = xso.variable(dims='zoo', foreign=True,
+                       flux='fish_graze_zoo', negative=True)
+
+    fish_forcing = xso.forcing(foreign=True,
+                               description='prescribed fish biomass')
+
+    kernel_P = xso.parameter(dims='phyto',
+                             description='log-normal selectivity weights on P (peak=1)')
+    kernel_Z = xso.parameter(dims='zoo',
+                             description='log-normal selectivity weights on Z (peak=1)')
+    rate = xso.parameter(description='peak fish grazing rate per unit fish biomass')
+
+    @xso.flux(dims='phyto')
+    def fish_graze_phyto(self, phyto, zoo, fish_forcing,
+                         kernel_P, kernel_Z, rate):
+        return rate * fish_forcing * kernel_P * phyto
+
+    @xso.flux(dims='zoo')
+    def fish_graze_zoo(self, phyto, zoo, fish_forcing,
+                       kernel_P, kernel_Z, rate):
+        return rate * fish_forcing * kernel_Z * zoo
