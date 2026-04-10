@@ -93,6 +93,24 @@ class LinearForcingInput:
         return forcing * rate
 
 
+@xso.component
+class StockNutrientSupply:
+    """New nutrient supply following Stock et al. (2008), Eq. 7.
+
+    Adds a constant volumetric source term FN/de to the nutrient pool,
+    where FN is the new-nutrient flux per unit area [mmol N m-2 d-1]
+    and de is the euphotic-zone box depth [m]. At steady state this
+    source balances uptake minus recycling, i.e. equals new production.
+    """
+    var = xso.variable(foreign=True, flux='input', negative=False,
+                       description='nutrient pool receiving new-N supply')
+    FN = xso.parameter(description='new nutrient flux per area [mmol N m-2 d-1]')
+    de = xso.parameter(description='euphotic-zone box depth [m]')
+
+    @xso.flux
+    def input(self, var, FN, de):
+        return FN / de
+
 # =============================================================================
 # PHYTOPLANKTON GROWTH
 # =============================================================================

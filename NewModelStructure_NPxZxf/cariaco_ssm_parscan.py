@@ -17,7 +17,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 
 from cariaco_ssm_comps import (
     Nutrient, PhytoSizeSpectrum, ZooSizeSpectrum,
-    ConstantExternalNutrient, ConstantFishForcing,
+    ConstantExternalNutrient, StockNutrientSupply, ConstantFishForcing,
     LinearForcingInput, MonodGrowth_SizeBased,
     SizebasedGrazingMatrix_Full_TypeIII,
     FishGrazing_Kernel,
@@ -223,13 +223,15 @@ kernel_P_fish,kernel_Z_fish = compute_fish_kernel_vdl_joint(phyto_esd,zoo_esd)
 N0_cariaco       = 5.5564
 dilution_cariaco = 0.016786
 
+FN = 2.6695
+d_e = 50.0                     # m, surface box depth
+
 # Parameters for Detritus
 D_init = 0.01                  # mmol N m-3
 f_egest_D_zoo = 0.75           # Fasham: 75% egesta to D, 25% sloppy to N
 f_mort_D_phyto = 0.9           # Fasham-style: most mortality to D
 f_mort_D_zoo = 0.5             # Stock-style: half to D, half exported
 k_remin = 0.1                  # d-1, warm tropical
-d_e = 50.0                     # m, surface box depth
 w_sink = 5.0                   # m d-1, bulk detritus sinking
 sinking_rate = w_sink / d_e    # d-1
 
@@ -244,7 +246,7 @@ model = xso.create({
     'Zooplankton':    ZooSizeSpectrum,
     'Detritus':       Detritus,
     'N0':             ConstantExternalNutrient,
-    'Inflow':         LinearForcingInput,
+    'Inflow':         StockNutrientSupply,
     'Growth':         MonodGrowth_SizeBased,
     'Grazing':        SizebasedGrazingMatrix_Full_TypeIII,
     'GGE':            GGE_Full_SizeDep_withD,
@@ -269,7 +271,7 @@ input_vars = {
                       'zoo_index': zoo_esd.tolist()},
     'Detritus': {'value_label': 'D', 'value_init': D_init},
     'N0':     {'forcing_label': 'N0', 'value': N0_cariaco},
-    'Inflow': {'forcing': 'N0', 'rate': dilution_cariaco, 'var': 'N'},
+    'Inflow': {'var': 'N', 'FN': F_N, 'de':d_e},
     'Growth': {'resource': 'N', 'consumer': 'P',
                'halfsat': K_s, 'mu_max': mu_max},
     'Grazing': {'resource': 'P', 'consumer': 'Z',
