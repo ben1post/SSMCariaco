@@ -403,65 +403,6 @@ compare_euphotic_proxy_models <- function(scenario_data,
 }
 
 
-# =========================================================================
-# 3. ASSIGN DEPTH CUTOFFS
-# =========================================================================
-
-if (depth_mode == "fixed") {
-    backbone$depth_cutoff <- fixed_depth
-    backbone$cutoff_source <- "fixed"
-
-} else if (depth_mode == "scenario") {
-    backbone <- backbone %>%
-      mutate(
-        depth_cutoff = case_when(
-          upwelling == "upwelling" ~ scenario_depths["upwelling"],
-          upwelling == "relaxed" ~ scenario_depths["relaxed"],
-          TRUE ~ NA_real_
-        ),
-        cutoff_source = "scenario"
-      )
-
-} else if (depth_mode == "dynamic") {
-    if (is.null(proxy_model)) {
-      stop("proxy_model required for dynamic depth mode")
-    }
-    
-    # Use pre-computed predictions from proxy_model
-    # This works for both "isotherm" and "isotherm_chl" model types
-    proxy_predictions <- proxy_model$predictions %>%
-      mutate(time_month = format(date, "%m-%Y")) %>%
-      group_by(time_month) %>%
-      summarize(
-        euphotic_depth_predicted = mean(euphotic_depth_best, na.rm = TRUE),
-        prediction_source = first(prediction_source),
-        .groups = "drop"
-      ) %>%
-      mutate(euphotic_depth_predicted = ifelse(is.nan(euphotic_depth_predicted), 
-                                                NA_real_, 
-                                                euphotic_depth_predicted))
-    
-    backbone <- backbone %>%
-      left_join(proxy_predictions %>% select(time_month, euphotic_depth_predicted, prediction_source),
-                by = "time_month") %>%
-      mutate(
-        depth_cutoff = euphotic_depth_predicted,
-        cutoff_source = ifelse(!is.na(prediction_source), prediction_source, "no_prediction")
-      ) %>%
-      select(-euphotic_depth_predicted, -prediction_source)
-    
-    cat(sprintf("  Dynamic cutoffs from %s model\n", proxy_model$model_type))
-
-} else if (depth_mode == "observed") {
-    # Use actual observed euphotic depth where available
-    backbone <- backbone %>%
-      mutate(
-        depth_cutoff = euphotic_depth_obs,
-        cutoff_source = "observed"
-      )
-}
-
-cat(sprintf("  With depth cutoff: %d months\n", sum(!is.na(backbone$depth_cutoff))))
 
 #' Integrate profiles to specified depth cutoffs
 #'
@@ -855,21 +796,39 @@ get_full_scenario_data <- function(profile_data,
         cutoff_source = "scenario"
       )
     
-  } else if (depth_mode == "dynamic") {
+ } else if (depth_mode == "dynamic") {
     if (is.null(proxy_model)) {
       stop("proxy_model required for dynamic depth mode")
     }
-    # Use predicted euphotic depth where available
-    backbone <- backbone %>%
+
+    # Aggregate per-date predictions from the proxy model to monthly
+    proxy_predictions_monthly <- proxy_model$predictions %>%
+      mutate(time_month = format(date, "%m-%Y")) %>%
+      group_by(time_month) %>%
+      summarize(
+        euphotic_depth_predicted = mean(euphotic_depth_best, na.rm = TRUE),
+        prediction_source        = first(prediction_source),
+        .groups = "drop"
+      ) %>%
       mutate(
-        depth_cutoff = ifelse(
-          !is.na(euphotic_depth_obs),
-          euphotic_depth_obs,
-          proxy_model$intercept + proxy_model$slope * Isotherm_21
-        ),
-        cutoff_source = "dynamic"
+        euphotic_depth_predicted = ifelse(is.nan(euphotic_depth_predicted),
+                                          NA_real_,
+                                          euphotic_depth_predicted)
       )
-  } else if (depth_mode == "observed") {
+
+    backbone <- backbone %>%
+      left_join(proxy_predictions_monthly, by = "time_month") %>%
+      mutate(
+        depth_cutoff  = euphotic_depth_predicted,
+        cutoff_source = ifelse(!is.na(prediction_source),
+                               prediction_source,
+                               "no_prediction")
+      ) %>%
+      select(-euphotic_depth_predicted, -prediction_source)
+
+    cat(sprintf("  Dynamic cutoffs from %s model\n", proxy_model$model_type))
+
+    } else if (depth_mode == "observed") {
     # Use actual observed euphotic depth where available
     backbone <- backbone %>%
       mutate(
