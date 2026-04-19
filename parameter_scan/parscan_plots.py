@@ -25,8 +25,16 @@ TYPE_COLOR_PALETTES = {
     'zoo':      ['#f48c06', '#e85d04'],              # oranges: gt200 -> gt500
     'nutrient': ['#6a4c93'],                         # purple
     'detritus': ['#7b4b2a'],                         # brown
+    'export':   ['#808080'],                         # grey
 }
 
+TYPE_UNITS = {
+    'phyto':    'mmol N m⁻³',
+    'zoo':      'mmol N m⁻³',
+    'nutrient': 'mmol N m⁻³',
+    'detritus': 'mmol N m⁻³',
+    'export':   'mmol N m⁻² d⁻¹',
+}
 
 def _assign_colors(bin_definitions):
     """Return one color per bin definition, based on type + order within type."""
@@ -216,9 +224,9 @@ def plot_model_vs_obs_boxplots(model_vec, monthly_df, bin_definitions,
         ax.set_xticks(range(len(cols)))
         ax.set_xticklabels(labels, fontsize=9, rotation=15, ha='right')
         ax.set_title(type_name.capitalize())
+        ax.set_ylabel(TYPE_UNITS.get(type_name, ''), fontsize=9)
         ax.grid(axis='y', linestyle='--', alpha=0.5)
 
-    axes[0].set_ylabel('Biomass (mmol N m⁻³)')
     axes[0].legend(fontsize=8)
 
     suptitle = 'CARIACO: Obs (monthly) vs Best-fit Model'

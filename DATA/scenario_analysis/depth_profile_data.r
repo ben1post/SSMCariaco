@@ -961,7 +961,31 @@ get_full_scenario_data <- function(profile_data,
     mutate(across(where(is.numeric), ~ifelse(is.nan(.), NA_real_, .)))
   
   cat(sprintf("Niskin: %d months with data\n", nrow(niskin_monthly)))
-  
+
+
+  # =========================================================================
+  # 5b. COMPUTE PER-MONTH NEW NUTRIENT FLUX (F_N, Stock-style)
+  # =========================================================================
+  # Laws (2011) f-ratio applied to each month's own Temp_C and PP_mgC_m2_d.
+  # Computing F_N at monthly resolution preserves variance and avoids the
+  # non-linearity error of applying a non-linear function to regime-means.
+  #   f_ratio = (0.5857 - 0.0165*T) * PP / (51.7 + PP)    [Laws 2011]
+  #   new_prod_C (mg C m-2 d-1)     = f_ratio * PP
+  #   FN_mmolN_m2_d (mmol N m-2 d-1) = new_prod_C / 12.01 * (16/106)
+
+  niskin_monthly <- niskin_monthly %>%
+    mutate(
+      f_ratio       = (0.5857 - 0.0165 * Temp_C) * PP_mgC_m2_d /
+                      (51.7 + PP_mgC_m2_d),
+      new_prod_C    = f_ratio * PP_mgC_m2_d,
+      FN_mmolN_m2_d = new_prod_C / MW_CARBON * REDFIELD_N_C,
+    ) %>%
+    select(-f_ratio, -new_prod_C)   # keep only the final column
+
+  cat(sprintf("F_N computed for %d months\n",
+              sum(!is.na(niskin_monthly$FN_mmolN_m2_d))))
+
+    
   # =========================================================================
   # 6. LOAD ZOOPLANKTON (aggregate to monthly)
   # =========================================================================
@@ -1045,6 +1069,21 @@ get_full_scenario_data <- function(profile_data,
     full_data <- full_data %>%
       left_join(trap_monthly, by = "time_month")
   }
+
+  # Martin-corrected export to model boundary (depth_cutoff)
+  # export_corrected = export_225m * (z_trap / depth_cutoff)^b
+  #   z_trap  = 225 m (CARIACO trap depth)
+  #   b       = 0.858 (Martin et al. 1987 canonical exponent)
+  # Result is raw trap flux remapped to the model's euphotic-zone boundary,
+  # so model export (flux leaving the box) and obs are at the same depth.
+  full_data <- full_data %>%
+    mutate(
+      export_flux_corrected_mmolN = ifelse(
+        !is.na(export_flux_mmolN) & !is.na(depth_cutoff),
+        export_flux_mmolN * (225 / depth_cutoff)^0.858,
+        NA_real_
+      )
+    )
   
   full_data <- full_data %>%
     arrange(date)
@@ -1166,6 +1205,10 @@ get_scenario_metadata <- function() {
     # Export
     "export_flux_mmolN",  "mmol N m⁻² d⁻¹",    "Particulate N export flux",                       "Sediment trap at 225m, duration-weighted monthly mean. Raw flux, no Martin correction applied",
     "trap_CN",            "mol:mol",           "C:N ratio of sinking particles",                  "From sediment trap Corg and N fluxes",
+
+    # Derived forcing and corrected export
+    "FN_mmolN_m2_d",              "mmol N m⁻² d⁻¹",  "New nutrient flux per area (F_N)",        "Per-month Laws (2011) f-ratio × PP, then N conversion. Drives Stock et al. (2008) nutrient supply F_N/d_e.",
+    "export_flux_corrected_mmolN", "mmol N m⁻² d⁻¹", "Export flux corrected to depth_cutoff",   "Martin (1987) correction: export_225m × (225/depth_cutoff)^0.858. Use this for model–obs comparison.",
     
     # Environment
     "Isotherm_21",        "m",                 "Depth of 21°C isotherm",                          "From CTD, first depth where T < 21°C",

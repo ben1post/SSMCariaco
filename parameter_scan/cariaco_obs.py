@@ -46,6 +46,8 @@ TARGET_BIN_DEFINITIONS = [
     {'label': 'Zoo >500 µm',    'column': 'zoo_gt500_mmolN', 'type': 'zoo',
      'size_min': 500.0, 'size_max': np.inf},
     {'label': 'NO3',            'column': 'NO3_mmolN',       'type': 'nutrient'},
+    {'label': 'PON',     'column': 'PON_mmolN',                  'type': 'detritus'},
+    {'label': 'Export',  'column': 'export_flux_corrected_mmolN','type': 'export'},
 ]
 
 
@@ -83,6 +85,10 @@ def load_cariaco_targets(regime='all', csv_path=DEFAULT_CSV_PATH,
         The filtered monthly dataframe with only the target columns
         (plus 'date', 'time_month', 'upwelling', 'ui' for reference).
         Useful for boxplots / variance analysis.
+    forcing : dict
+        Regime-specific model forcing keyed by XSO parameter name:
+        {'Inflow__FN': float, 'Inflow__de': float}. Pass directly as
+        `fixed_overrides` to run_xso_parscan.
     """
     df = pd.read_csv(csv_path)
 
@@ -115,6 +121,20 @@ def load_cariaco_targets(regime='all', csv_path=DEFAULT_CSV_PATH,
                 f"Target '{label}' has no valid observations in regime '{regime}'."
             )
 
+    # Regime-specific forcing for the model (F_N, d_e).
+    # Both are computed upstream in the R data pipeline at monthly resolution;
+    # here we just take the regime-mean of the pre-computed columns.
+    forcing = {
+        'Inflow__FN': float(filtered['FN_mmolN_m2_d'].mean(skipna=True)),
+        'Inflow__de': float(filtered['depth_cutoff'].mean(skipna=True)),
+    }
+    for k, v in forcing.items():
+        if np.isnan(v):
+            raise ValueError(
+                f"Cannot compute forcing '{k}' for regime '{regime}' — "
+                f"source column has no valid values."
+            )
+    
     labels = [b['label'] for b in bin_definitions]
 
-    return obs_vec, labels, bin_definitions, monthly_df
+    return obs_vec, labels, bin_definitions, monthly_df, forcing

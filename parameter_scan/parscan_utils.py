@@ -34,7 +34,8 @@ def get_fraction_in_range(lower, upper, target_min, target_max):
 # =============================================================================
 # MODEL → TARGET AGGREGATION
 # =============================================================================
-def aggregate_model_to_targets(model_state, phyto_esd, zoo_esd, bin_definitions):
+def aggregate_model_to_targets(model_state, phyto_esd, zoo_esd,
+                               bin_definitions, d_e=None):
     """
     Aggregate model output onto observation targets defined by bin_definitions.
 
@@ -45,14 +46,19 @@ def aggregate_model_to_targets(model_state, phyto_esd, zoo_esd, bin_definitions)
             'phyto'    -> 1D array over phyto size classes
             'zoo'      -> 1D array over zoo size classes
             'nutrient' -> scalar
-        Additional keys (e.g. 'detritus') can be added as new target types
-        are introduced.
+            'detritus' -> scalar (PON)
+            'export'   -> scalar (volumetric sinking flux, mmol N m-3 d-1;
+                                  multiplied by d_e to give areal flux
+                                  matching trap observations)
     phyto_esd : array-like
         Phyto size-class centers (µm ESD).
     zoo_esd : array-like
         Zoo size-class centers (µm ESD).
     bin_definitions : list of dict
         Target bin definitions from cariaco_obs.TARGET_BIN_DEFINITIONS.
+    d_e : float, optional
+        Euphotic-zone box depth [m]. Required if any 'export' targets
+        are present (used to convert volumetric sinking flux to areal).
 
     Returns
     -------
@@ -84,11 +90,21 @@ def aggregate_model_to_targets(model_state, phyto_esd, zoo_esd, bin_definitions)
         elif t == 'nutrient':
             model_vec[k] = float(model_state['nutrient'])
 
+        elif t == 'detritus':
+            model_vec[k] = float(model_state['detritus'])
+
+        elif t == 'export':
+            if d_e is None:
+                raise ValueError(
+                    "d_e must be provided to aggregate 'export' targets.")
+            # volumetric flux [mmol N m-3 d-1] * box depth [m]
+            #   -> areal flux [mmol N m-2 d-1]  (matches trap obs)
+            model_vec[k] = float(model_state['export']) * d_e
+
         else:
             raise ValueError(
-                f"Unknown target type '{t}' in bin_definitions. "
-                f"Supported: 'phyto', 'zoo', 'nutrient'."
-            )
+                f"Unknown target type '{t}' in bin_definitions. Supported: "
+                f"'phyto', 'zoo', 'nutrient', 'detritus', 'export'.")
 
     return model_vec
 
@@ -108,7 +124,6 @@ def compute_cost_nrmsre(model_vec, obs_vec):
     rel_errors = (model_vec - obs_vec) / obs_vec
     return np.sqrt(np.mean(rel_errors ** 2))
 
-
 # =============================================================================
 # 2D COST GRID
 # =============================================================================
@@ -121,9 +136,17 @@ def compute_cost_grid(scan_results, phyto_esd, zoo_esd, obs_vec,
     Parameters
     ----------
     scan_results : xarray.Dataset
-        Output from run_xso_parscan. Must contain 'Phytoplankton__biomass',
-        'Zooplankton__biomass', 'Nutrient__value' with a 'time' dimension
-        and two scan dimensions.
+        Output from run_xso_parscan. Must contain the model variables
+        needed by the target types present in bin_definitions:
+            'phyto'    -> 'Phytoplankton__biomass'
+            'zoo'      -> 'Zooplankton__biomass'
+            'nutrient' -> 'Nutrient__value'
+            'detritus' -> 'Detritus__value'
+            'export'   -> 'DetritusSink__sinking_value'
+        All must have a 'time' dimension and the two scan dimensions.
+        For 'export' targets, scan_results must also carry 'Inflow__de'
+        as a coordinate (attached automatically when Inflow__de is
+        passed via fixed_overrides to run_xso_parscan).
     phyto_esd, zoo_esd : arrays
         Size class centers (µm ESD).
     obs_vec : np.ndarray, shape (n_targets,)
@@ -135,8 +158,8 @@ def compute_cost_grid(scan_results, phyto_esd, zoo_esd, obs_vec,
     dim1_name, dim2_name : str
         Names of the two scan dimensions in scan_results.
     reject_negative : bool
-        If True, runs with any negative biomass/nutrient in the averaged
-        state are flagged as failed (cost = NaN). Ecological models cannot
+        If True, runs with any negative value in the averaged state
+        are flagged as failed (cost = NaN). Ecological models cannot
         produce negative values — negatives indicate numerical breakdown.
 
     Returns
@@ -146,12 +169,40 @@ def compute_cost_grid(scan_results, phyto_esd, zoo_esd, obs_vec,
     model_grid : np.ndarray, shape (n1, n2, n_targets)
         Model target vector for each combination. NaN rows for failed runs.
     """
-    P_avg = scan_results['Phytoplankton__biomass'].isel(
-        time=slice(-avg_window, None)).mean('time')
-    Z_avg = scan_results['Zooplankton__biomass'].isel(
-        time=slice(-avg_window, None)).mean('time')
-    N_avg = scan_results['Nutrient__value'].isel(
-        time=slice(-avg_window, None)).mean('time')
+    tail = slice(-avg_window, None)
+    types_needed = set(b['type'] for b in bin_definitions)
+
+    # Map target type -> (scan_results variable name, model_state key)
+    var_map = {
+        'phyto':    ('Phytoplankton__biomass',      'phyto'),
+        'zoo':      ('Zooplankton__biomass',        'zoo'),
+        'nutrient': ('Nutrient__value',             'nutrient'),
+        'detritus': ('Detritus__value',             'detritus'),
+        'export':   ('DetritusSink__sinking_value', 'export'),
+    }
+
+    averaged = {}
+    for t in types_needed:
+        if t not in var_map:
+            raise ValueError(
+                f"Unknown target type '{t}' in bin_definitions. "
+                f"Supported: {list(var_map)}."
+            )
+        ds_name, state_key = var_map[t]
+        averaged[state_key] = scan_results[ds_name].isel(time=tail).mean('time')
+
+    # Pull d_e from the scan coords (attached automatically when Inflow__de
+    # is passed via fixed_overrides). Only needed if 'export' targets exist.
+    d_e = None
+    if 'export' in types_needed:
+        if 'Inflow__de' not in scan_results.coords:
+            raise ValueError(
+                "Bin definitions contain 'export' targets, but scan_results "
+                "has no 'Inflow__de' coordinate. Pass Inflow__de via "
+                "fixed_overrides when running the parscan so d_e is recorded "
+                "alongside the scan."
+            )
+        d_e = float(scan_results['Inflow__de'].values)
 
     n1 = len(scan_results[dim1_name])
     n2 = len(scan_results[dim2_name])
@@ -162,28 +213,27 @@ def compute_cost_grid(scan_results, phyto_esd, zoo_esd, obs_vec,
 
     for i in range(n1):
         for j in range(n2):
-            p_vals = P_avg.isel({dim1_name: i, dim2_name: j}).values
-            z_vals = Z_avg.isel({dim1_name: i, dim2_name: j}).values
-            n_val = N_avg.isel({dim1_name: i, dim2_name: j}).values
-
-            # Reject NaN (failed integration)
-            if np.any(np.isnan(p_vals)) or np.any(np.isnan(z_vals)) or np.isnan(n_val):
+            model_state = {}
+            bad = False
+            for key, arr in averaged.items():
+                val = arr.isel({dim1_name: i, dim2_name: j}).values
+                if np.any(np.isnan(val)):
+                    bad = True
+                    break
+                if reject_negative and np.any(val < 0):
+                    bad = True
+                    break
+                model_state[key] = val
+            if bad:
                 continue
 
-            # Reject negative biomass (numerical breakdown)
-            if reject_negative:
-                if np.any(p_vals < 0) or np.any(z_vals < 0) or n_val < 0:
-                    continue
-
             model_vec = aggregate_model_to_targets(
-                {'phyto': p_vals, 'zoo': z_vals, 'nutrient': n_val},
-                phyto_esd, zoo_esd, bin_definitions,
+                model_state, phyto_esd, zoo_esd, bin_definitions, d_e=d_e,
             )
             model_grid[i, j, :] = model_vec
             cost_grid[i, j] = compute_cost_nrmsre(model_vec, obs_vec)
 
     return cost_grid, model_grid
-
 
 # =============================================================================
 # BEST-FIT EXTRACTION

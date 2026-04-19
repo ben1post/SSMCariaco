@@ -14,7 +14,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 
 from cariaco_ssm_comps import (
     Nutrient, PhytoSizeSpectrum, ZooSizeSpectrum,
-    ConstantExternalNutrient, StockNutrientSupply, ConstantFishForcing,
+    StockNutrientSupply, ConstantFishForcing,
     LinearForcingInput, MonodGrowth_SizeBased,
     SizebasedGrazingMatrix_Full_TypeIII,
     FishGrazing_Kernel,
@@ -217,8 +217,6 @@ fish_rate    = 0.005
 # data-based kernel:
 kernel_P_fish,kernel_Z_fish = compute_fish_kernel_vdl_joint(phyto_esd,zoo_esd)
 
-N0_cariaco       = 5.5564
-dilution_cariaco = 0.016786
 
 F_N = 2.6695
 d_e = 50.0                     # m, surface box depth
@@ -242,7 +240,6 @@ model = xso.create({
     'Phytoplankton':  PhytoSizeSpectrum,
     'Zooplankton':    ZooSizeSpectrum,
     'Detritus':       Detritus,
-    'N0':             ConstantExternalNutrient,
     'Inflow':         StockNutrientSupply,
     'Growth':         MonodGrowth_SizeBased,
     'Grazing':        SizebasedGrazingMatrix_Full_TypeIII,
@@ -267,7 +264,6 @@ input_vars = {
     'Zooplankton':   {'biomass_label': 'Z', 'biomass_init': zoo_init,
                       'zoo_index': zoo_esd.tolist()},
     'Detritus': {'value_label': 'D', 'value_init': D_init},
-    'N0':     {'forcing_label': 'N0', 'value': N0_cariaco},
     'Inflow': {'var': 'N', 'FN': F_N, 'de':d_e},
     'Growth': {'resource': 'N', 'consumer': 'P',
                'halfsat': K_s, 'mu_max': mu_max},
