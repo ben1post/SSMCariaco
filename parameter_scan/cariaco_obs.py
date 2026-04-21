@@ -46,10 +46,18 @@ TARGET_BIN_DEFINITIONS = [
     {'label': 'Zoo >500 µm',    'column': 'zoo_gt500_mmolN', 'type': 'zoo',
      'size_min': 500.0, 'size_max': np.inf},
     {'label': 'NO3',            'column': 'NO3_mmolN',       'type': 'nutrient'},
-    {'label': 'PON',     'column': 'PON_mmolN',                  'type': 'detritus'},
+    {'label': 'PP',    'column': 'PP_mmolN_m3_d',   'type': 'pp'},
     {'label': 'Export',  'column': 'export_flux_corrected_mmolN','type': 'export'},
 ]
 
+# Passthrough diagnostic columns — carried into monthly_df for inspection,
+# NOT used as model-data comparison targets.
+DIAGNOSTIC_COLS = [
+    'Chl_niskin_mgm3',
+    'Phaeo_niskin_mgm3',
+    'Chl_niskin_mmolN',
+    'PhaeoChl_ratio',
+]
 
 # =============================================================================
 # LOADER
@@ -109,7 +117,8 @@ def load_cariaco_targets(regime='all', csv_path=DEFAULT_CSV_PATH,
     target_cols = [b['column'] for b in bin_definitions]
     context_cols = [c for c in ('date', 'time_month', 'upwelling', 'ui')
                     if c in filtered.columns]
-    monthly_df = filtered[context_cols + target_cols].copy()
+    diagnostic_cols = [c for c in DIAGNOSTIC_COLS if c in filtered.columns]
+    monthly_df = filtered[context_cols + target_cols + diagnostic_cols].copy()
 
     # Build obs vector (mean across months, NaN-safe)
     obs_vec = np.array([monthly_df[col].mean(skipna=True) for col in target_cols])

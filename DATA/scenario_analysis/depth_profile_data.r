@@ -58,7 +58,7 @@ load_hplc_profiles <- function() {
 #'
 #' @param force_recompute If TRUE, recompute even if cache exists
 #' @return Data frame with columns: date, depth, and interpolated variables
-load_niskin_profiles <- function(force_recompute = FALSE) {
+load_niskin_profiles <- function(force_recompute = TRUE) {
 
   cache_file <- "../processed/Niskin_depth_profiles.rds"
   
@@ -78,7 +78,7 @@ load_niskin_profiles <- function(force_recompute = FALSE) {
   
   niskin_ds <- readRDS("../processed/Niskin_cleaned.rds")
   
-  niskin_vars <- c("NO3_merged", "Chlorophyll", "PrimaryProductivity", 
+  niskin_vars <- c("NO3_merged", "Chlorophyll", "Phaeopigments", "PrimaryProductivity", 
                    "PN_ug_L", "Temperature")
   
   niskin_interpolated_list <- list()
@@ -531,7 +531,7 @@ integrate_hplc <- function(hplc_profiles, cutoffs, na_threshold = 10) {
 #' @return Data frame with integrated/averaged Niskin variables
 integrate_niskin <- function(niskin_profiles, cutoffs, na_threshold = 10) {
   
-  niskin_vars <- c("NO3_merged", "Chlorophyll", "PrimaryProductivity", 
+  niskin_vars <- c("NO3_merged", "Chlorophyll", "Phaeopigments", "PrimaryProductivity", 
                    "PN_ug_L", "Temperature")
   
   # Variables to integrate (flux-like)
@@ -939,22 +939,45 @@ get_full_scenario_data <- function(profile_data,
                          mean(NO3_merged, na.rm = TRUE), NA_real_),
       PON_mmolN = ifelse(sum(is.na(PN_ug_L)) < 10,
                          mean(PN_ug_L, na.rm = TRUE) / 14.007, NA_real_),
+      # PP (areal, carbon) — kept for reference / diagnostics
       PP_mgC_m2_d = ifelse(sum(is.na(PrimaryProductivity)) < 10,
                            mean(PrimaryProductivity, na.rm = TRUE) * first(depth_cutoff) * 12,
                            NA_real_),
+      # PP (volumetric, N) — for direct comparison with model uptake flux.
+      # PrimaryProductivity is mg C m-3 h-1; ×12 (12h daylight), /MW_C, ×Redfield.
+      PP_mmolN_m3_d = ifelse(sum(is.na(PrimaryProductivity)) < 10,
+                             mean(PrimaryProductivity, na.rm = TRUE) * 12 /
+                               MW_CARBON * REDFIELD_N_C,
+                             NA_real_),
+      # Niskin fluorometric Chl & Phaeo (both mg m-3, depth-mean 0 -> depth_cutoff)
+      Chl_niskin_mgm3 = ifelse(sum(is.na(Chlorophyll)) < 10,
+                               mean(Chlorophyll, na.rm = TRUE), NA_real_),
+      Phaeo_niskin_mgm3 = ifelse(sum(is.na(Phaeopigments)) < 10,
+                                 mean(Phaeopigments, na.rm = TRUE), NA_real_),
       Temp_C = ifelse(sum(is.na(Temperature)) < 10,
                       mean(Temperature, na.rm = TRUE), NA_real_),
       .groups = "drop"
+    ) %>%
+    mutate(
+      # Niskin Chl in model units (mmol N m-3) — for direct parity with phyto targets
+      Chl_niskin_mmolN = Chl_niskin_mgm3 * C_TO_CHL / MW_CARBON * REDFIELD_N_C,
+      # Diagnostic ratio (dimensionless, mg/mg)
+      PhaeoChl_ratio   = Phaeo_niskin_mgm3 / Chl_niskin_mgm3
     )
   
   # Aggregate to monthly
   niskin_monthly <- niskin_integrated %>%
     group_by(time_month) %>%
     summarize(
-      NO3_mmolN = mean(NO3_mmolN, na.rm = TRUE),
-      PON_mmolN = mean(PON_mmolN, na.rm = TRUE),
-      PP_mgC_m2_d = mean(PP_mgC_m2_d, na.rm = TRUE),
-      Temp_C = mean(Temp_C, na.rm = TRUE),
+      NO3_mmolN        = mean(NO3_mmolN, na.rm = TRUE),
+      PON_mmolN        = mean(PON_mmolN, na.rm = TRUE),
+      PP_mgC_m2_d      = mean(PP_mgC_m2_d, na.rm = TRUE),
+      PP_mmolN_m3_d    = mean(PP_mmolN_m3_d, na.rm = TRUE),
+      Chl_niskin_mgm3  = mean(Chl_niskin_mgm3, na.rm = TRUE),
+      Phaeo_niskin_mgm3= mean(Phaeo_niskin_mgm3, na.rm = TRUE),
+      Chl_niskin_mmolN = mean(Chl_niskin_mmolN, na.rm = TRUE),
+      PhaeoChl_ratio   = mean(PhaeoChl_ratio, na.rm = TRUE),
+      Temp_C           = mean(Temp_C, na.rm = TRUE),
       n_niskin_samples = n(),
       .groups = "drop"
     ) %>%
@@ -1155,6 +1178,17 @@ summarize_full_scenario <- function(full_data) {
       # Environment
       Temp = mean(Temp_C, na.rm = TRUE),
       Isotherm_21 = mean(Isotherm_21, na.rm = TRUE),
+
+      # Rates
+      PP = mean(PP_mgC_m2_d, na.rm = TRUE),
+      PP_mmolN = mean(PP_mmolN_m3_d, na.rm = TRUE),
+      export = mean(export_flux_mmolN, na.rm = TRUE),
+      
+      # Niskin Chl & Phaeo diagnostics
+      Chl_niskin_mgm3   = mean(Chl_niskin_mgm3, na.rm = TRUE),
+      Phaeo_niskin_mgm3 = mean(Phaeo_niskin_mgm3, na.rm = TRUE),
+      Chl_niskin_mmolN  = mean(Chl_niskin_mmolN, na.rm = TRUE),
+      PhaeoChl_ratio    = mean(PhaeoChl_ratio, na.rm = TRUE),
       
       .groups = "drop"
     )
@@ -1189,6 +1223,12 @@ get_scenario_metadata <- function() {
     "micro_frac",         "dimensionless",     "Microphytoplankton fraction of total",            "From diagnostic pigment ratios",
     "nano_frac",          "dimensionless",     "Nanophytoplankton fraction of total",             "From diagnostic pigment ratios",
     "pico_frac",          "dimensionless",     "Picophytoplankton fraction of total",             "From diagnostic pigment ratios",
+
+    "PP_mmolN_m3_d",    "mmol N m⁻³ d⁻¹",  "Primary productivity, volumetric N",              "Niskin PP [mgC m⁻³ h⁻¹] × 12 / 12.01 × (16/106). Native volumetric — no depth division needed. For direct comparison with model phyto uptake flux.",
+    "Chl_niskin_mgm3",  "mg m⁻³",          "Niskin fluorometric chlorophyll (depth-mean)",    "Interpolated Niskin Chlorophyll, mean over 0-depth_cutoff. Raw units.",
+    "Phaeo_niskin_mgm3","mg m⁻³",          "Niskin phaeopigments (depth-mean)",               "Interpolated Niskin Phaeopigments, mean over 0-depth_cutoff. Raw units.",
+    "Chl_niskin_mmolN", "mmol N m⁻³",      "Niskin chlorophyll in model units",               "Chl_niskin_mgm3 × 50 / 12.01 × (16/106). Uses living-phyto C:Chl=50.",
+    "PhaeoChl_ratio",   "dimensionless",   "Phaeopigment : Chl a ratio (mg/mg)",              "Phaeo_niskin_mgm3 / Chl_niskin_mgm3. Qualitative grazing/senescence diagnostic.",
     
     # Nutrients (Niskin-derived)
     "NO3_mmolN",          "mmol N m⁻³",        "Nitrate concentration (0 to depth_cutoff mean)",  "Interpolated Niskin NO3, mean over 0-depth_cutoff",
@@ -1279,6 +1319,20 @@ summarize_full_scenario_detailed <- function(full_data, include_unclassified = T
       n_PP = sum(!is.na(PP_mgC_m2_d)),
       PP_mean = mean(PP_mgC_m2_d, na.rm = TRUE),
       PP_sd = sd(PP_mgC_m2_d, na.rm = TRUE),
+
+      PP_mmolN_mean = mean(PP_mmolN_m3_d, na.rm = TRUE),
+      PP_mmolN_sd   = sd(PP_mmolN_m3_d, na.rm = TRUE),
+      
+      # Niskin Chl & Phaeo diagnostics
+      n_Chl_niskin       = sum(!is.na(Chl_niskin_mgm3)),
+      Chl_niskin_mean    = mean(Chl_niskin_mgm3, na.rm = TRUE),
+      Chl_niskin_sd      = sd(Chl_niskin_mgm3, na.rm = TRUE),
+      n_Phaeo_niskin     = sum(!is.na(Phaeo_niskin_mgm3)),
+      Phaeo_niskin_mean  = mean(Phaeo_niskin_mgm3, na.rm = TRUE),
+      Phaeo_niskin_sd    = sd(Phaeo_niskin_mgm3, na.rm = TRUE),
+      Chl_niskin_mmolN_mean = mean(Chl_niskin_mmolN, na.rm = TRUE),
+      PhaeoChl_ratio_mean   = mean(PhaeoChl_ratio, na.rm = TRUE),
+      PhaeoChl_ratio_sd     = sd(PhaeoChl_ratio, na.rm = TRUE),
       
       n_export = sum(!is.na(export_flux_mmolN)),
       export_mean = mean(export_flux_mmolN, na.rm = TRUE),
@@ -1307,6 +1361,10 @@ summarize_full_scenario_detailed <- function(full_data, include_unclassified = T
       zoo_gt500 = sum(!is.na(zoo_gt500_mmolN)),
       export_flux = sum(!is.na(export_flux_mmolN)),
       Isotherm_21 = sum(!is.na(Isotherm_21)),
+      PP_mmolN    = sum(!is.na(PP_mmolN_m3_d)),
+      Chl_niskin  = sum(!is.na(Chl_niskin_mgm3)),
+      Phaeo_niskin = sum(!is.na(Phaeo_niskin_mgm3)),
+      PhaeoChl    = sum(!is.na(PhaeoChl_ratio)),
       .groups = "drop"
     )
   
@@ -1354,10 +1412,12 @@ summarize_full_scenario_detailed <- function(full_data, include_unclassified = T
     mutate(across(where(is.numeric) & !matches("^n_"), ~round(., 4))) %>%
     print(row.names = FALSE)
   
- cat("\n=== Primary Production (mg C m⁻² d⁻¹) ===\n")
+  cat("\n=== Primary Production ===\n")
+  cat("  PP_mean (areal):      mg C m⁻² d⁻¹\n")
+  cat("  PP_mmolN_mean (vol):  mmol N m⁻³ d⁻¹  — direct match to model uptake\n")
   summary_stats %>%
-    select(upwelling_group, n_PP, PP_mean, PP_sd) %>%
-    mutate(across(where(is.numeric) & !matches("^n_"), ~round(., 1))) %>%
+    select(upwelling_group, n_PP, PP_mean, PP_sd, PP_mmolN_mean, PP_mmolN_sd) %>%
+    mutate(across(where(is.numeric) & !matches("^n_"), ~round(., 3))) %>%
     print(row.names = FALSE)
   
   cat("\n=== Export Flux (mmol N m⁻² d⁻¹) ===\n")
@@ -1365,6 +1425,17 @@ summarize_full_scenario_detailed <- function(full_data, include_unclassified = T
   summary_stats %>%
     select(upwelling_group, n_export, export_mean, export_sd) %>%
     mutate(across(where(is.numeric) & !matches("^n_"), ~round(., 4))) %>%
+    print(row.names = FALSE)
+
+  cat("\n=== Niskin Chl & Phaeopigments Diagnostics ===\n")
+  cat("  Chl & Phaeo: mg m⁻³   |   Chl_mmolN: mmol N m⁻³   |   ratio: mg/mg\n")
+  summary_stats %>%
+    select(upwelling_group, 
+           n_Chl_niskin, Chl_niskin_mean, Chl_niskin_sd,
+           n_Phaeo_niskin, Phaeo_niskin_mean, Phaeo_niskin_sd,
+           Chl_niskin_mmolN_mean,
+           PhaeoChl_ratio_mean, PhaeoChl_ratio_sd) %>%
+    mutate(across(where(is.numeric) & !matches("^n_"), ~round(., 3))) %>%
     print(row.names = FALSE)
   
   cat("\n=== Environment ===\n")

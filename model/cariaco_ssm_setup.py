@@ -295,5 +295,23 @@ model_setup = xso.setup(
     solver='solve_ivp',
     model=model,
     time=np.arange(0, 5000, 1),
+    input_vars=input_vars
+)
+
+model_setup_slim = xso.setup(
+    solver='solve_ivp',
+    model=model,
+    time=np.arange(0, 5000, 1),
     input_vars=input_vars,
+    output_vars= {'Phytoplankton__biomass', 'Zooplankton__biomass', 'Nutrient__value',
+              'Detritus__value', 'DetritusSink__sinking_value',
+              'Growth__uptake_value', 'Inflow__de'}
+
+)
+
+model_setup_stability = xso.setup(
+    solver='stability', 
+    model=model,
+    time=[0,1],
+    input_vars=input_vars
 )
