@@ -11,45 +11,24 @@ import numpy as np
 # =============================================================================
 # TARGET TYPE REGISTRY
 # =============================================================================
-# Single source of truth for how each target type is extracted from scan
-# results. Adding a new target type requires:
-#   1. An entry in TARGET_EXTRACTORS below (how to extract it)
+# Single source of truth for which XSO output variable each target type
+# reads from. Adding a new target type requires:
+#   1. An entry here (how to extract it from scan output)
 #   2. An 'aggregate' branch in aggregate_model_to_targets (how to collapse
-#      it to a scalar against obs)
+#      the extracted value to a scalar against obs)
 #   3. (Plotting only) entries in parscan_plots.TYPE_COLOR_PALETTES
 #      and TYPE_UNITS
 #
-# Per-type entry schema:
-#   'ivp'    : str — name of the XSO output variable in an IVP scan
-#              (will be time-averaged over the tail window in the caller).
-#   'steady' : either
-#                (a) str — name of a state variable present in the
-#                    stability scan output (evaluated at time=-1), or
-#                (b) callable (stability_results, steady_ds) -> DataArray
-#                    — analytical reconstruction from steady-state state
-#                    + parameters, returning a DataArray broadcastable
-#                    against the scan dims (and, where applicable, the
-#                    size-class dim).
+# The same variable name is used for both IVP and steady-state scans.
+# The caller handles temporal aggregation (time-averaging for IVP,
+# time=-1 selection for stability).
 TARGET_EXTRACTORS = {
-    'phyto':    {'ivp': 'Phytoplankton__biomass',
-                 'steady': 'Phytoplankton__biomass'},
-    'zoo':      {'ivp': 'Zooplankton__biomass',
-                 'steady': 'Zooplankton__biomass'},
-    'nutrient': {'ivp': 'Nutrient__value',
-                 'steady': 'Nutrient__value'},
-    'detritus': {'ivp': 'Detritus__value',
-                 'steady': 'Detritus__value'},
-    'export':   {'ivp': 'DetritusSink__sinking_value',
-                 'steady': lambda ds, steady: (
-                     ds['DetritusSink__sinking_rate']
-                     * steady['Detritus__value'])},
-    'pp':       {'ivp': 'Growth__uptake_value',
-                 'steady': lambda ds, steady: (
-                     ds['Growth__mu_max']
-                     * steady['Nutrient__value']
-                     / (steady['Nutrient__value']
-                        + ds['Growth__halfsat'])
-                     * steady['Phytoplankton__biomass'])},
+    'phyto':    'Phytoplankton__biomass',
+    'zoo':      'Zooplankton__biomass',
+    'nutrient': 'Nutrient__value',
+    'detritus': 'Detritus__value',
+    'export':   'DetritusSink__sinking_value',
+    'pp':       'Growth__uptake_value',
 }
 
 # Types whose aggregation needs d_e (euphotic-zone box depth) in model_state.
@@ -265,86 +244,175 @@ def _iterate_cost_grid(state_das, n1, n2, dim1_name, dim2_name,
     return cost_grid, model_grid
 
 
+def _build_state_das(results_ds, bin_definitions, time_collapser):
+    """Extract target-type DataArrays from scan output, collapsing time.
+
+    Walks over the unique target types in `bin_definitions`, looks each one
+    up in TARGET_EXTRACTORS to find its XSO output variable name, and
+    applies `time_collapser` to reduce the time dimension to a single value
+    per scan cell.
+
+    The returned dict uses the target type as the key (not the XSO variable
+    name), matching the `model_state` keys expected by
+    `aggregate_model_to_targets`.
+
+    Parameters
+    ----------
+    results_ds : xarray.Dataset
+        Scan output — either from `run_xso_parscan` (IVP) or
+        `run_xso_stabilityscan` (steady state). Must contain each XSO
+        variable named in TARGET_EXTRACTORS for the types used.
+    bin_definitions : list of dict
+        Target definitions; only the 'type' field is read here.
+    time_collapser : callable
+        DataArray -> DataArray reducing the 'time' dim. Typical choices:
+          IVP:      lambda da: da.isel(time=slice(-avg_window, None)).mean('time')
+          Steady:   lambda da: da.isel(time=-1)
+
+    Returns
+    -------
+    state_das : dict[str, xarray.DataArray]
+        Keys are target types ('phyto', 'zoo', ...); values are DataArrays
+        with scan dims (and any extra model dim like 'phyto' or 'zoo'),
+        time already collapsed.
+
+    Raises
+    ------
+    ValueError
+        If a target type in `bin_definitions` is not in TARGET_EXTRACTORS,
+        or if its XSO output variable is missing from `results_ds`
+        (typically because it was not added to `output_vars` in the setup).
+    """
+    state_das = {}
+    for t in set(b['type'] for b in bin_definitions):
+        if t not in TARGET_EXTRACTORS:
+            raise ValueError(
+                f"Unknown target type '{t}' in bin_definitions. "
+                f"Supported: {sorted(TARGET_EXTRACTORS)}."
+            )
+        var_name = TARGET_EXTRACTORS[t]
+        if var_name not in results_ds.variables:
+            raise ValueError(
+                f"Target type '{t}' requires '{var_name}' in results_ds "
+                f"but it is not present."
+            )
+        state_das[t] = time_collapser(results_ds[var_name])
+    return state_das
+
+
+def _resolve_de(results_ds, types_needed):
+    """Resolve the euphotic-zone box depth (d_e) for aggregation.
+
+    Some target types (those in TYPES_REQUIRING_DE, e.g. 'export') need
+    d_e to convert volumetric model fluxes to areal observation units.
+    d_e may have been supplied as a fixed value (via `fixed_overrides` at
+    scan time) or may vary across the scan grid. This helper normalises
+    both cases into a pair (scalar, DataArray) where exactly one is set.
+
+    If no type in `types_needed` requires d_e, both returns are None.
+
+    Parameters
+    ----------
+    results_ds : xarray.Dataset
+        Must contain 'Inflow__de' if any type in `types_needed` requires it.
+    types_needed : set of str
+        Target types present in the current bin_definitions.
+
+    Returns
+    -------
+    d_e_scalar : float or None
+        Set (and `d_e_da` is None) if d_e is a scalar — stored as a 0-D
+        DataArray in `results_ds` because it was fixed across the scan.
+    d_e_da : xarray.DataArray or None
+        Set (and `d_e_scalar` is None) if d_e varies across the scan
+        dims. Caller indexes it per cell.
+
+    Raises
+    ------
+    ValueError
+        If `types_needed` contains a type in TYPES_REQUIRING_DE but
+        'Inflow__de' is not in `results_ds`.
+    """
+    if not (TYPES_REQUIRING_DE & types_needed):
+        return None, None
+    if 'Inflow__de' not in results_ds.variables:
+        raise ValueError(
+            "Bin definitions contain target(s) in TYPES_REQUIRING_DE, but "
+            "'Inflow__de' is not in results_ds."
+        )
+    d_e_da = results_ds['Inflow__de']
+    if d_e_da.ndim == 0:
+        return float(d_e_da.values), None
+    return None, d_e_da
+
 # =============================================================================
 # 2D COST GRID — IVP SCAN
 # =============================================================================
 def compute_cost_grid(scan_results, phyto_esd, zoo_esd, obs_vec,
                       bin_definitions, avg_window, dim1_name, dim2_name,
                       reject_negative=True):
-    """
-    Post-process an xso.parscans 2D IVP scan into a cost grid.
+    """Post-process an xso.parscans 2D IVP scan into a cost grid.
 
-    For each cell, each target type's XSO output variable (see
-    TARGET_EXTRACTORS[t]['ivp']) is averaged over the last `avg_window`
-    timesteps, then aggregated to the target vector and scored against
-    obs_vec.
+    For each cell in the (dim1_name × dim2_name) scan grid, each target
+    type's XSO output variable (see TARGET_EXTRACTORS) is averaged over
+    the last `avg_window` timesteps, then aggregated into the target
+    vector via `aggregate_model_to_targets` and scored against `obs_vec`
+    using NRMSRE.
+
+    Cells with any negative averaged value are flagged as failed
+    (cost = NaN) when `reject_negative=True`. This is the appropriate
+    default for IVP output — true-zero state variables can't go negative
+    in a correctly specified NPZD system, so negatives indicate solver
+    instability rather than floating-point noise.
 
     Parameters
     ----------
     scan_results : xarray.Dataset
-        Must contain each TARGET_EXTRACTORS[t]['ivp'] variable with a
-        'time' dim and both scan dims. If any 'export' target is present,
-        must also contain 'Inflow__de'.
+        Output from `run_xso_parscan`. Must contain each XSO variable
+        named in TARGET_EXTRACTORS for the types used in `bin_definitions`,
+        each with a 'time' dim and both scan dims. If any 'export' target
+        is present, must also contain 'Inflow__de'.
+    phyto_esd, zoo_esd : array-like
+        Size-class centers (µm ESD).
+    obs_vec : np.ndarray, shape (n_targets,)
+        Observation target vector.
+    bin_definitions : list of dict
+        Target bin definitions (must match obs_vec ordering).
     avg_window : int
-        Number of final timesteps to average.
+        Number of final timesteps to average over (steady-state window).
+    dim1_name, dim2_name : str
+        Names of the two scan dimensions in `scan_results`.
     reject_negative : bool
-        If True, cells with any negative averaged value are flagged
-        as failed (cost = NaN).
+        If True (default), cells with any negative averaged value are
+        flagged as failed. If False, negatives are passed through to
+        aggregation (cost may still be NaN if obs_vec contains zeros).
 
     Returns
     -------
     cost_grid : np.ndarray, shape (n1, n2)
+        NRMSRE cost per cell; NaN for failed cells.
     model_grid : np.ndarray, shape (n1, n2, n_targets)
+        Aggregated model target vector per cell; NaN for failed cells.
     """
     tail = slice(-avg_window, None)
-    types_needed = set(b['type'] for b in bin_definitions)
-
-    # Average each required output variable over the tail window.
-    state_das = {}
-    for t in types_needed:
-        if t not in TARGET_EXTRACTORS:
-            raise ValueError(
-                f"Unknown target type '{t}' in bin_definitions. "
-                f"Supported: {sorted(TARGET_EXTRACTORS)}."
-            )
-        var_name = TARGET_EXTRACTORS[t]['ivp']
-        if var_name not in scan_results.variables:
-            raise ValueError(
-                f"Target type '{t}' requires '{var_name}' in scan_results "
-                f"but it is not present. Add it to output_vars in the "
-                f"model setup."
-            )
-        state_das[t] = (scan_results[var_name]
-                        .isel(time=tail).mean('time'))
-
-    # d_e: scalar (fixed via overrides) or scan-dim-varying.
-    d_e_scalar = None
-    d_e_da = None
-    if TYPES_REQUIRING_DE & types_needed:
-        if 'Inflow__de' not in scan_results.variables:
-            raise ValueError(
-                "Bin definitions contain target(s) in TYPES_REQUIRING_DE, "
-                "but scan_results does not contain 'Inflow__de'. Make sure "
-                "the Inflow component is part of your model setup."
-            )
-        d_e_da = scan_results['Inflow__de']
-        if d_e_da.ndim == 0:
-            d_e_scalar = float(d_e_da.values)
-            d_e_da = None
-
-    n1 = len(scan_results[dim1_name])
-    n2 = len(scan_results[dim2_name])
-
-    # reject_negative=True  -> neg_tolerance=0.0  (any negative fails)
-    # reject_negative=False -> neg_tolerance=+inf (negatives accepted)
-    neg_tol = 0.0 if reject_negative else np.inf
+    state_das = _build_state_das(
+        scan_results, bin_definitions,
+        time_collapser=lambda da: da.isel(time=tail).mean('time'),
+    )
+    d_e_scalar, d_e_da = _resolve_de(
+        scan_results, set(b['type'] for b in bin_definitions)
+    )
 
     return _iterate_cost_grid(
-        state_das, n1, n2, dim1_name, dim2_name,
-        bin_definitions, obs_vec, phyto_esd, zoo_esd,
+        state_das,
+        n1=len(scan_results[dim1_name]),
+        n2=len(scan_results[dim2_name]),
+        dim1_name=dim1_name, dim2_name=dim2_name,
+        bin_definitions=bin_definitions, obs_vec=obs_vec,
+        phyto_esd=phyto_esd, zoo_esd=zoo_esd,
         d_e_scalar=d_e_scalar, d_e_da=d_e_da,
         stable_mask=None,
-        neg_tolerance=neg_tol,
+        neg_tolerance=0.0 if reject_negative else np.inf,
         clip_small_negatives=False,
     )
 
@@ -429,80 +497,79 @@ def compute_cost_grid_steady_state(stability_results, phyto_esd, zoo_esd,
                                    dim1_name, dim2_name,
                                    neg_tolerance=1e-6,
                                    require_stable=True):
-    """
-    Post-process an xso.parscans stability scan into a cost grid.
+    """Post-process an xso.parscans stability scan into a cost grid.
 
-    For each cell, each target type's extractor (see
-    TARGET_EXTRACTORS[t]['steady']) is evaluated at the fsolve steady
-    state (time=-1). Extractors are either a variable name (for state
-    variables directly present in stability_results) or a callable
-    (stability_results, steady_ds) -> DataArray for analytical
-    reconstruction of fluxes not stored in the scan output.
+    For each cell, each target type's XSO output variable (see
+    TARGET_EXTRACTORS) is evaluated at the fsolve steady state (time=-1),
+    aggregated into the target vector via `aggregate_model_to_targets`,
+    and scored against `obs_vec` using NRMSRE.
 
     A cell becomes NaN in the cost grid if:
-      - require_stable=True and stability != 'stable'
-      - any extracted value is < -neg_tolerance (true negative, not noise)
-      - any extracted value is NaN (fsolve failed)
+      - `require_stable=True` and the cell's stability label is not
+        'stable'
+      - any extracted value is < -neg_tolerance (treated as a true
+        negative rather than floating-point noise)
+      - any extracted value is NaN (fsolve failed to converge)
 
-    Small negative values in [-neg_tolerance, 0) are clipped to 0.
+    Small negative values in [-neg_tolerance, 0) are clipped to 0 before
+    aggregation. This is needed because fsolve reports roots up to its
+    tolerance, which can produce state variables a few machine-epsilons
+    below zero at true-zero equilibria.
+
+    Requires an XSO version where the NumericalStabilitySolver evaluates
+    flux functions at the steady state (rather than zeroing them).
+    Earlier versions return 0 for all flux variables, which would make
+    'pp' and 'export' targets silently yield zero model values.
+
+    Parameters
+    ----------
+    stability_results : xarray.Dataset
+        Output from `run_xso_stabilityscan`. Must contain each XSO
+        variable named in TARGET_EXTRACTORS for the types used, plus a
+        'stability' variable and (if any 'export' target is present)
+        'Inflow__de'.
+    phyto_esd, zoo_esd : array-like
+        Size-class centers (µm ESD).
+    obs_vec : np.ndarray, shape (n_targets,)
+        Observation target vector.
+    bin_definitions : list of dict
+        Target bin definitions (must match obs_vec ordering).
+    dim1_name, dim2_name : str
+        Names of the two scan dimensions in `stability_results`.
+    neg_tolerance : float
+        Magnitude below which negative values are treated as fsolve noise
+        and clipped to 0. Values more negative than -neg_tolerance flag
+        the cell as failed.
+    require_stable : bool
+        If True (default), cells where the stability label is not
+        'stable' are flagged as failed. If False, unstable equilibria
+        are still scored (useful for exploring cost-landscape structure
+        beyond the stable region).
 
     Returns
     -------
     cost_grid : np.ndarray, shape (n1, n2)
+        NRMSRE cost per cell; NaN for failed cells.
     model_grid : np.ndarray, shape (n1, n2, n_targets)
+        Aggregated model target vector per cell; NaN for failed cells.
     """
-    steady = stability_results.isel(time=-1)
-    types_needed = set(b['type'] for b in bin_definitions)
-
-    state_das = {}
-    for t in types_needed:
-        if t not in TARGET_EXTRACTORS:
-            raise ValueError(
-                f"Unknown target type '{t}' in bin_definitions. "
-                f"Supported: {sorted(TARGET_EXTRACTORS)}."
-            )
-        extractor = TARGET_EXTRACTORS[t]['steady']
-        if isinstance(extractor, str):
-            if extractor not in stability_results.variables:
-                raise ValueError(
-                    f"Target type '{t}' requires '{extractor}' in "
-                    f"stability_results but it is not present."
-                )
-            state_das[t] = steady[extractor]
-        elif callable(extractor):
-            try:
-                state_das[t] = extractor(stability_results, steady)
-            except KeyError as e:
-                raise ValueError(
-                    f"Target type '{t}' requires analytical reconstruction "
-                    f"from stability_results, but a required variable is "
-                    f"missing: {e}"
-                ) from e
-        else:
-            raise TypeError(
-                f"TARGET_EXTRACTORS['{t}']['steady'] must be a str or "
-                f"callable, got {type(extractor).__name__}."
-            )
-
-    # d_e: always scalar in steady-state scans (forcing is fixed).
-    d_e_scalar = None
-    if TYPES_REQUIRING_DE & types_needed:
-        if 'Inflow__de' not in stability_results.variables:
-            raise ValueError(
-                "Bin definitions contain target(s) in TYPES_REQUIRING_DE, "
-                "but stability_results does not contain 'Inflow__de'."
-            )
-        d_e_scalar = float(stability_results['Inflow__de'].values)
-
+    state_das = _build_state_das(
+        stability_results, bin_definitions,
+        time_collapser=lambda da: da.isel(time=-1),
+    )
+    d_e_scalar, _ = _resolve_de(
+        stability_results, set(b['type'] for b in bin_definitions)
+    )
     stable_mask = (stability_results['stability'] == 'stable'
                    if require_stable else None)
 
-    n1 = len(stability_results[dim1_name])
-    n2 = len(stability_results[dim2_name])
-
     return _iterate_cost_grid(
-        state_das, n1, n2, dim1_name, dim2_name,
-        bin_definitions, obs_vec, phyto_esd, zoo_esd,
+        state_das,
+        n1=len(stability_results[dim1_name]),
+        n2=len(stability_results[dim2_name]),
+        dim1_name=dim1_name, dim2_name=dim2_name,
+        bin_definitions=bin_definitions, obs_vec=obs_vec,
+        phyto_esd=phyto_esd, zoo_esd=zoo_esd,
         d_e_scalar=d_e_scalar, d_e_da=None,
         stable_mask=stable_mask,
         neg_tolerance=neg_tolerance,
