@@ -11,6 +11,7 @@ import xso
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
+from xso.parscans import avg_tail
 
 from cariaco_ssm_comps import (
     Nutrient, PhytoSizeSpectrum, ZooSizeSpectrum,

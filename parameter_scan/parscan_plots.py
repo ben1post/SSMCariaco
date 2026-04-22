@@ -66,7 +66,7 @@ def _group_by_type(bin_definitions):
 # 1. COST HEATMAP
 # =============================================================================
 def plot_cost_heatmap(cost_grid, vals1, vals2, p1_label, p2_label,
-                      best, default=None, figsize=(9, 7)):
+                      best, default=None, stable_mask=None, figsize=(9, 7)):
     """
     2D cost heatmap with contours, best-fit marker, and optional default marker.
 
@@ -82,6 +82,10 @@ def plot_cost_heatmap(cost_grid, vals1, vals2, p1_label, p2_label,
         Output of find_best_fit().
     default : dict or None
         Optional: {'val1': float, 'val2': float} to mark default parameters.
+    stable_mask : np.ndarray of bool or None, optional
+        Same shape as `cost_grid`; True where the cell is a stable steady
+        state. If provided, a black contour outlining the stable region is
+        overlaid on the heatmap.
     """
     fig, ax = plt.subplots(figsize=figsize)
 
@@ -89,7 +93,6 @@ def plot_cost_heatmap(cost_grid, vals1, vals2, p1_label, p2_label,
     im = ax.pcolormesh(vals2, vals1, cost_grid,
                        cmap='viridis_r', vmin=0, vmax=vmax, shading='auto')
 
-    # Contour lines for good-fit regions
     X, Y = np.meshgrid(vals2, vals1)
     levels = [0.3, 0.5, 1.0, 2.0]
     valid_levels = [l for l in levels if l <= np.nanmax(cost_grid)]
@@ -98,12 +101,16 @@ def plot_cost_heatmap(cost_grid, vals1, vals2, p1_label, p2_label,
                         colors='white', linewidths=1.0, alpha=0.7)
         ax.clabel(cs, fmt='%.1f', fontsize=8)
 
-    # Best fit
+    if stable_mask is not None:
+        unstable_mask = ~stable_mask
+        unstable_overlay = np.where(unstable_mask, 1.0, np.nan)
+        ax.pcolor(vals2, vals1, unstable_overlay,
+                  hatch='////', alpha=0.0, shading='auto')
+
     ax.plot(best['val2'], best['val1'], '*', color='red', markersize=18,
             markeredgecolor='white', markeredgewidth=1.2,
             label=f"Best fit (cost={best['cost']:.3f})")
 
-    # Default
     if default is not None:
         ax.plot(default['val2'], default['val1'], 'D', color='orange',
                 markersize=10, markeredgecolor='white', markeredgewidth=1.0,
@@ -114,9 +121,14 @@ def plot_cost_heatmap(cost_grid, vals1, vals2, p1_label, p2_label,
     ax.set_ylabel(p1_label, fontsize=12)
     ax.set_title('2D Parameter Scan: Fit to CARIACO Observations\n'
                  'Cost = Normalized RMSRE across targets', fontsize=13)
-    ax.legend(loc='upper right', fontsize=10)
+    handles, labels = ax.get_legend_handles_labels()
+    if stable_mask is not None:
+        from matplotlib.patches import Patch
+        handles.append(Patch(facecolor='white', edgecolor='black',
+                             hatch='////', label='Unstable'))
+        labels.append('Unstable')
+    ax.legend(handles, labels, loc='upper right', fontsize=10)
     plt.tight_layout()
-    # fig.savefig('cost_heatmap.pdf', bbox_inches='tight')
     return fig
 
 

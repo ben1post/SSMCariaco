@@ -244,44 +244,45 @@ def _iterate_cost_grid(state_das, n1, n2, dim1_name, dim2_name,
     return cost_grid, model_grid
 
 
-def _build_state_das(results_ds, bin_definitions, time_collapser):
-    """Extract target-type DataArrays from scan output, collapsing time.
+def _adaptive_time_collapser(da, avg_window=None):
+    """Collapse a DataArray's 'time' dim according to its length.
 
-    Walks over the unique target types in `bin_definitions`, looks each one
-    up in TARGET_EXTRACTORS to find its XSO output variable name, and
-    applies `time_collapser` to reduce the time dimension to a single value
-    per scan cell.
-
-    The returned dict uses the target type as the key (not the XSO variable
-    name), matching the `model_state` keys expected by
-    `aggregate_model_to_targets`.
-
-    Parameters
-    ----------
-    results_ds : xarray.Dataset
-        Scan output — either from `run_xso_parscan` (IVP) or
-        `run_xso_stabilityscan` (steady state). Must contain each XSO
-        variable named in TARGET_EXTRACTORS for the types used.
-    bin_definitions : list of dict
-        Target definitions; only the 'type' field is read here.
-    time_collapser : callable
-        DataArray -> DataArray reducing the 'time' dim. Typical choices:
-          IVP:      lambda da: da.isel(time=slice(-avg_window, None)).mean('time')
-          Steady:   lambda da: da.isel(time=-1)
-
-    Returns
-    -------
-    state_das : dict[str, xarray.DataArray]
-        Keys are target types ('phyto', 'zoo', ...); values are DataArrays
-        with scan dims (and any extra model dim like 'phyto' or 'zoo'),
-        time already collapsed.
+    - no 'time' dim → pass through unchanged
+    - 'time' length 1 → isel(time=0) (e.g. output of avg_tail postprocess)
+    - 'time' length 2 → isel(time=-1) (stability scan: [initial, steady])
+    - 'time' length > 2 → tail-mean over `avg_window` (raw IVP scan)
 
     Raises
     ------
     ValueError
-        If a target type in `bin_definitions` is not in TARGET_EXTRACTORS,
-        or if its XSO output variable is missing from `results_ds`
-        (typically because it was not added to `output_vars` in the setup).
+        If 'time' length > 2 and `avg_window` is None.
+    """
+    if 'time' not in da.dims:
+        return da
+
+    n = da.sizes['time']
+    if n == 1:
+        return da.isel(time=0)
+    if n == 2:
+        return da.isel(time=-1)
+
+    if avg_window is None:
+        raise ValueError(
+            f"'{da.name}' has time dim of length {n} (> 2) but avg_window "
+            f"was not provided. Either pre-collapse the scan output (e.g. "
+            f"with xso.parscans.avg_tail) or pass avg_window explicitly."
+        )
+    return da.isel(time=slice(-avg_window, None)).mean('time')
+
+    
+def _build_state_das(results_ds, bin_definitions, avg_window=None):
+    """Extract target-type DataArrays from scan output, collapsing time.
+
+    Walks over the unique target types in `bin_definitions`, looks each one
+    up in TARGET_EXTRACTORS to find its XSO output variable name, and
+    applies `_adaptive_time_collapser` so the caller doesn't need to know
+    whether the input is a raw IVP scan, a post-processed IVP scan, or a
+    stability scan.
     """
     state_das = {}
     for t in set(b['type'] for b in bin_definitions):
@@ -296,7 +297,7 @@ def _build_state_das(results_ds, bin_definitions, time_collapser):
                 f"Target type '{t}' requires '{var_name}' in results_ds "
                 f"but it is not present."
             )
-        state_das[t] = time_collapser(results_ds[var_name])
+        state_das[t] = _adaptive_time_collapser(results_ds[var_name], avg_window)
     return state_das
 
 
@@ -345,78 +346,113 @@ def _resolve_de(results_ds, types_needed):
         return float(d_e_da.values), None
     return None, d_e_da
 
+    
 # =============================================================================
-# 2D COST GRID — IVP SCAN
+# 2D COST GRID 
 # =============================================================================
-def compute_cost_grid(scan_results, phyto_esd, zoo_esd, obs_vec,
-                      bin_definitions, avg_window, dim1_name, dim2_name,
-                      reject_negative=True):
-    """Post-process an xso.parscans 2D IVP scan into a cost grid.
+def compute_cost_grid(
+    results_ds,
+    phyto_esd, zoo_esd,
+    obs_vec,
+    bin_definitions,
+    dim1_name, dim2_name,
+    *,
+    avg_window=None,
+    neg_tolerance=0.0,
+    clip_small_negatives=False,
+    require_stable=False,
+):
+    """Post-process a 2D XSO parameter-scan Dataset into a cost grid.
 
-    For each cell in the (dim1_name × dim2_name) scan grid, each target
-    type's XSO output variable (see TARGET_EXTRACTORS) is averaged over
-    the last `avg_window` timesteps, then aggregated into the target
-    vector via `aggregate_model_to_targets` and scored against `obs_vec`
-    using NRMSRE.
+    Handles IVP, post-processed IVP, and stability scans uniformly —
+    the time dim is collapsed adaptively based on its length (see
+    `_adaptive_time_collapser`). Variables without a time dim are
+    passed through. For each cell, target values are aggregated via
+    `aggregate_model_to_targets` and scored against `obs_vec` using
+    NRMSRE.
 
-    Cells with any negative averaged value are flagged as failed
-    (cost = NaN) when `reject_negative=True`. This is the appropriate
-    default for IVP output — true-zero state variables can't go negative
-    in a correctly specified NPZD system, so negatives indicate solver
-    instability rather than floating-point noise.
+    Typical usage
+    -------------
+    Post-processed IVP (time=1, e.g. after `avg_tail` hook)::
+
+        compute_cost_grid(scan_results, phyto_esd, zoo_esd, obs_vec,
+                          bin_defs, P1, P2)
+
+    Raw IVP (time=5000)::
+
+        compute_cost_grid(scan_results, ..., avg_window=1000)
+
+    Stability scan (time=2)::
+
+        compute_cost_grid(stability_results, ...,
+                          neg_tolerance=1e-6,
+                          clip_small_negatives=True,
+                          require_stable=True)
 
     Parameters
     ----------
-    scan_results : xarray.Dataset
-        Output from `run_xso_parscan`. Must contain each XSO variable
-        named in TARGET_EXTRACTORS for the types used in `bin_definitions`,
-        each with a 'time' dim and both scan dims. If any 'export' target
-        is present, must also contain 'Inflow__de'.
+    results_ds : xarray.Dataset
+        Output from `run_xso_parscan` or `run_xso_stabilityscan`. Must
+        contain each XSO variable named in TARGET_EXTRACTORS for the
+        target types used. If any 'export' target is present, must also
+        contain 'Inflow__de'. If `require_stable=True`, must also contain
+        'stability'.
     phyto_esd, zoo_esd : array-like
         Size-class centers (µm ESD).
     obs_vec : np.ndarray, shape (n_targets,)
-        Observation target vector.
     bin_definitions : list of dict
-        Target bin definitions (must match obs_vec ordering).
-    avg_window : int
-        Number of final timesteps to average over (steady-state window).
     dim1_name, dim2_name : str
-        Names of the two scan dimensions in `scan_results`.
-    reject_negative : bool
-        If True (default), cells with any negative averaged value are
-        flagged as failed. If False, negatives are passed through to
-        aggregation (cost may still be NaN if obs_vec contains zeros).
+        Names of the two scan dimensions in `results_ds`.
+    avg_window : int or None, optional
+        Number of final time steps to average when the time dim has
+        length > 2. Required only in that case; silently ignored when
+        time is absent, length 1, or length 2.
+    neg_tolerance : float, optional
+        Values more negative than -neg_tolerance flag the cell as failed
+        (cost = NaN). Default 0.0 → any negative fails. Use a small
+        positive value (e.g. 1e-6) for fsolve-based stability scans to
+        tolerate floating-point noise around zero.
+    clip_small_negatives : bool, optional
+        If True, values in [-neg_tolerance, 0) are clipped to 0 before
+        aggregation. Typical companion to a nonzero `neg_tolerance`.
+    require_stable : bool, optional
+        If True, cells whose 'stability' label is not 'stable' are
+        flagged as failed. Requires a 'stability' variable in `results_ds`.
 
     Returns
     -------
     cost_grid : np.ndarray, shape (n1, n2)
-        NRMSRE cost per cell; NaN for failed cells.
     model_grid : np.ndarray, shape (n1, n2, n_targets)
-        Aggregated model target vector per cell; NaN for failed cells.
+        Both NaN for failed cells.
     """
-    tail = slice(-avg_window, None)
-    state_das = _build_state_das(
-        scan_results, bin_definitions,
-        time_collapser=lambda da: da.isel(time=tail).mean('time'),
-    )
+    state_das = _build_state_das(results_ds, bin_definitions, avg_window)
     d_e_scalar, d_e_da = _resolve_de(
-        scan_results, set(b['type'] for b in bin_definitions)
+        results_ds, set(b['type'] for b in bin_definitions)
     )
+
+    if require_stable:
+        if 'stability' not in results_ds.variables:
+            raise ValueError(
+                "require_stable=True, but 'stability' is not in results_ds."
+            )
+        stable_mask = results_ds['stability'] == 'stable'
+    else:
+        stable_mask = None
 
     return _iterate_cost_grid(
         state_das,
-        n1=len(scan_results[dim1_name]),
-        n2=len(scan_results[dim2_name]),
+        n1=len(results_ds[dim1_name]),
+        n2=len(results_ds[dim2_name]),
         dim1_name=dim1_name, dim2_name=dim2_name,
         bin_definitions=bin_definitions, obs_vec=obs_vec,
         phyto_esd=phyto_esd, zoo_esd=zoo_esd,
         d_e_scalar=d_e_scalar, d_e_da=d_e_da,
-        stable_mask=None,
-        neg_tolerance=0.0 if reject_negative else np.inf,
-        clip_small_negatives=False,
+        stable_mask=stable_mask,
+        neg_tolerance=neg_tolerance,
+        clip_small_negatives=clip_small_negatives,
     )
 
-
+    
 # =============================================================================
 # BEST-FIT EXTRACTION
 # =============================================================================
@@ -489,89 +525,40 @@ def extract_steady_state_seed(scan_results, avg_window):
     return seed_ds, iv_mapping
 
 
-# =============================================================================
-# 2D COST GRID — STEADY STATE (from stability scan)
-# =============================================================================
-def compute_cost_grid_steady_state(stability_results, phyto_esd, zoo_esd,
-                                   obs_vec, bin_definitions,
-                                   dim1_name, dim2_name,
-                                   neg_tolerance=1e-6,
-                                   require_stable=True):
-    """Post-process an xso.parscans stability scan into a cost grid.
 
-    For each cell, each target type's XSO output variable (see
-    TARGET_EXTRACTORS) is evaluated at the fsolve steady state (time=-1),
-    aggregated into the target vector via `aggregate_model_to_targets`,
-    and scored against `obs_vec` using NRMSRE.
 
-    A cell becomes NaN in the cost grid if:
-      - `require_stable=True` and the cell's stability label is not
-        'stable'
-      - any extracted value is < -neg_tolerance (treated as a true
-        negative rather than floating-point noise)
-      - any extracted value is NaN (fsolve failed to converge)
+def run_single_point(model, model_setup, scan_params, fixed_overrides=None):
+    """Run a single IVP simulation at a specific parameter combination.
 
-    Small negative values in [-neg_tolerance, 0) are clipped to 0 before
-    aggregation. This is needed because fsolve reports roots up to its
-    tolerance, which can produce state variables a few machine-epsilons
-    below zero at true-zero equilibria.
+    Useful for re-running the model at best-fit parameters to obtain a full
+    time series for plotting, after a scan whose output may have been
+    time-collapsed by a postprocess hook (or a stability scan, which never
+    has a full time series to begin with).
 
-    Requires an XSO version where the NumericalStabilitySolver evaluates
-    flux functions at the steady state (rather than zeroing them).
-    Earlier versions return 0 for all flux variables, which would make
-    'pp' and 'export' targets silently yield zero model values.
+    Note: the parscan postprocess hook is NOT applied here — a direct
+    ``xsimlab.run()`` call always returns the full time series, regardless
+    of what ``run_xso_parscan`` was configured with.
 
     Parameters
     ----------
-    stability_results : xarray.Dataset
-        Output from `run_xso_stabilityscan`. Must contain each XSO
-        variable named in TARGET_EXTRACTORS for the types used, plus a
-        'stability' variable and (if any 'export' target is present)
-        'Inflow__de'.
-    phyto_esd, zoo_esd : array-like
-        Size-class centers (µm ESD).
-    obs_vec : np.ndarray, shape (n_targets,)
-        Observation target vector.
-    bin_definitions : list of dict
-        Target bin definitions (must match obs_vec ordering).
-    dim1_name, dim2_name : str
-        Names of the two scan dimensions in `stability_results`.
-    neg_tolerance : float
-        Magnitude below which negative values are treated as fsolve noise
-        and clipped to 0. Values more negative than -neg_tolerance flag
-        the cell as failed.
-    require_stable : bool
-        If True (default), cells where the stability label is not
-        'stable' are flagged as failed. If False, unstable equilibria
-        are still scored (useful for exploring cost-landscape structure
-        beyond the stable region).
+    model : xsimlab.Model
+        The XSO model (e.g. `cariaco_ssm_setup.model`).
+    model_setup : xarray.Dataset
+        The model setup (e.g. `model_setup_slim`). Governs which variables
+        are stored in the output.
+    scan_params : dict
+        Parameter overrides for this run, e.g.
+        ``{P1_NAME: best['val1'], P2_NAME: best['val2']}``.
+    fixed_overrides : dict or None, optional
+        Additional overrides (e.g. regime-specific forcing values).
 
     Returns
     -------
-    cost_grid : np.ndarray, shape (n1, n2)
-        NRMSRE cost per cell; NaN for failed cells.
-    model_grid : np.ndarray, shape (n1, n2, n_targets)
-        Aggregated model target vector per cell; NaN for failed cells.
+    xarray.Dataset
+        Full time-series output of the single run.
     """
-    state_das = _build_state_das(
-        stability_results, bin_definitions,
-        time_collapser=lambda da: da.isel(time=-1),
-    )
-    d_e_scalar, _ = _resolve_de(
-        stability_results, set(b['type'] for b in bin_definitions)
-    )
-    stable_mask = (stability_results['stability'] == 'stable'
-                   if require_stable else None)
-
-    return _iterate_cost_grid(
-        state_das,
-        n1=len(stability_results[dim1_name]),
-        n2=len(stability_results[dim2_name]),
-        dim1_name=dim1_name, dim2_name=dim2_name,
-        bin_definitions=bin_definitions, obs_vec=obs_vec,
-        phyto_esd=phyto_esd, zoo_esd=zoo_esd,
-        d_e_scalar=d_e_scalar, d_e_da=None,
-        stable_mask=stable_mask,
-        neg_tolerance=neg_tolerance,
-        clip_small_negatives=True,
-    )
+    overrides = dict(scan_params)
+    if fixed_overrides:
+        overrides.update(fixed_overrides)
+    with model:
+        return model_setup.xsimlab.update_vars(input_vars=overrides).xsimlab.run()
