@@ -141,7 +141,7 @@ def aggregate_model_to_targets(model_state, phyto_esd, zoo_esd,
 # =============================================================================
 # COST FUNCTION
 # =============================================================================
-def compute_cost_nrmsre(model_vec, obs_vec):
+def old_compute_cost_nrmsre(model_vec, obs_vec):
     """
     Normalized Root Mean Square Relative Error.
 
@@ -152,6 +152,26 @@ def compute_cost_nrmsre(model_vec, obs_vec):
     """
     rel_errors = (model_vec - obs_vec) / obs_vec
     return np.sqrt(np.mean(rel_errors ** 2))
+    
+
+def compute_cost_nrmsre(model_vec, obs_vec):
+    """
+    Log-space RMSE between model and observations.
+
+        cost = sqrt( (1/N) * Σ (log10(model_i) - log10(obs_i))^2 )
+
+    Dimensionless. Symmetric in factor-above vs factor-below obs
+    (10× too high and 10× too low both cost 1.0). Diverges for
+    model_i → 0, which penalizes ecologically-meaningless extinction
+    solutions that linear-relative-error costs reward.
+
+    Non-positive model values are floored at a small epsilon to keep
+    the log finite while still giving them a very large cost.
+    """
+    eps = 1e-12
+    model_safe = np.where(np.asarray(model_vec) > eps, model_vec, eps)
+    log_errors = np.log10(model_safe) - np.log10(obs_vec)
+    return np.sqrt(np.mean(log_errors ** 2))
 
 
 # =============================================================================
