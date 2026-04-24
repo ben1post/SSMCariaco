@@ -211,7 +211,7 @@ gge   = compute_gge(zoo_esd)
 m_Z   = 0.1
 KsZ   = 3.0
 
-phiPZ = compute_grazing_kernel(phyto_esd, zoo_esd)
+#phiPZ = compute_grazing_kernel(phyto_esd, zoo_esd)
 
 fish_biomass = 1.0
 fish_rate    = 0.005
@@ -261,15 +261,21 @@ model = xso.create({
 input_vars = {
     'Nutrient':      {'value_label': 'N', 'value_init': N_init},
     'Phytoplankton': {'biomass_label': 'P', 'biomass_init': phyto_init,
-                      'phyto_index': phyto_esd.tolist()},
+                      'phyto_esd_index': phyto_esd.tolist(),
+                      'phyto_esd_label': 'phyto_esd'},
     'Zooplankton':   {'biomass_label': 'Z', 'biomass_init': zoo_init,
-                      'zoo_index': zoo_esd.tolist()},
+                      'zoo_esd_index': zoo_esd.tolist(),
+                      'zoo_esd_label': 'zoo_esd'},
     'Detritus': {'value_label': 'D', 'value_init': D_init},
     'Inflow': {'var': 'N', 'FN': F_N, 'de':d_e},
     'Growth': {'resource': 'N', 'consumer': 'P',
                'halfsat': K_s, 'mu_max': mu_max},
     'Grazing': {'resource': 'P', 'consumer': 'Z',
-                'phiPZ': phiPZ, 'Imax': I_max, 'KsZ': KsZ},
+                'phyto_esd': 'phyto_esd',
+                'zoo_esd': 'zoo_esd',
+                'theta_opt': 10.0,
+                'sigma_log': 0.25,
+                'Imax': I_max, 'KsZ': KsZ},
     'GGE': {'grazed_phyto': 'P', 'grazed_zoo': 'Z',
             'assimilated_consumer': 'Z',
             'egested_detritus': 'D',

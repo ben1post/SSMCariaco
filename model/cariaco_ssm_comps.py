@@ -3,6 +3,40 @@ import numpy as np
 import xso
 
 
+
+def compute_grazing_kernel(phyto_esd, zoo_esd, theta_opt=10.0, sigma_log=0.25):
+    """Log-normal prey-size preference kernel for size-structured grazing.
+
+    Parameters
+    ----------
+    phyto_esd : array_like
+        Phyto ESDs (prey dim 'phyto').
+    zoo_esd : array_like
+        Zoo ESDs (predator dim 'zoo').
+    theta_opt : float
+        Optimal predator:prey size ratio (peak of the log-normal kernel).
+    sigma_log : float
+        Width of the kernel in log10(ESD) space.
+
+    Returns
+    -------
+    ndarray of shape (n_P + n_Z, n_Z)
+        Feeding preference matrix (prey x predator). The zoo-on-self diagonal
+        is zeroed to prevent cannibalism within a predator size class.
+    """
+    phyto_esd = np.asarray(phyto_esd)
+    zoo_esd = np.asarray(zoo_esd)
+    prey_esd = np.concatenate([phyto_esd, zoo_esd])
+    n_P = len(phyto_esd)
+    n_Z = len(zoo_esd)
+    log_ratio = np.log10(zoo_esd[None, :] / prey_esd[:, None])
+    log_theta = np.log10(theta_opt)
+    phiPZ = np.exp(-((log_ratio - log_theta) ** 2) / (2 * sigma_log ** 2))
+    for j in range(n_Z):
+        phiPZ[n_P + j, j] = 0.0
+    return phiPZ
+
+    
 # =============================================================================
 # STATE VARIABLES
 # =============================================================================
@@ -19,8 +53,9 @@ class PhytoSizeSpectrum:
     """Phytoplankton biomass across n size classes."""
     biomass = xso.variable(dims='phyto', description='phytoplankton biomass',
                            attrs={'units': 'mmol N m-3'})
-    phyto = xso.index(dims='phyto', description='phytoplankton size classes',
-                      attrs={'units': 'µm ESD'})
+    phyto_esd = xso.index(dims='phyto', as_parameter=True,
+                          description='phytoplankton size classes',
+                          attrs={'units': 'µm ESD'})
 
 
 @xso.component
@@ -28,8 +63,9 @@ class ZooSizeSpectrum:
     """Zooplankton biomass across n size classes."""
     biomass = xso.variable(dims='zoo', description='zooplankton biomass',
                            attrs={'units': 'mmol N m-3'})
-    zoo = xso.index(dims='zoo', description='zooplankton size classes',
-                    attrs={'units': 'µm ESD'})
+    zoo_esd = xso.index(dims='zoo', as_parameter=True,
+                        description='zooplankton size classes',
+                        attrs={'units': 'µm ESD'})
 
 
 @xso.component
@@ -135,7 +171,7 @@ class MonodGrowth_SizeBased:
 # =============================================================================
  
 @xso.component
-class SizebasedGrazingMatrix_Full_TypeIII:
+class old_SizebasedGrazingMatrix_Full_TypeIII:
     """Holling Type III grazing with full (P+Z) prey dimension.
  
     Following Mattern et al. (2026) / Dutkiewicz et al. (2015, 2020):
@@ -164,6 +200,55 @@ class SizebasedGrazingMatrix_Full_TypeIII:
         return FgrazMatrix
  
 
+
+@xso.component
+class SizebasedGrazingMatrix_Full_TypeIII:
+    """Holling Type III grazing with full (P+Z) prey dimension.
+
+    Following Mattern et al. (2026) / Dutkiewicz et al. (2015, 2020):
+
+        S_j  = Σ_k  φ_kj · B_k
+        G_ij = g_max_j · Z_j · φ_ij · B_i · S_j / (S_j² + K_graz²)
+
+    At low prey (S_j << K_graz):  grazing ∝ S_j² ≈ 0  (refuge for rare prey)
+    At high prey (S_j >> K_graz): grazing saturates like Type II
+
+    The feeding preference matrix phiPZ is computed internally at model
+    setup time from the foreign phyto_esd / zoo_esd size grids and the
+    local theta_opt / sigma_log kernel parameters, via the phiPZ_setup
+    method. This makes the kernel shape directly tunable as part of
+    model fitting, without needing to pre-compute it externally.
+    """
+    resource = xso.variable(foreign=True, dims='phyto')
+    consumer = xso.variable(foreign=True, dims='zoo')
+
+    phyto_esd = xso.parameter(foreign=True, dims='phyto',
+                              description='foreign ref to phyto size grid')
+    zoo_esd = xso.parameter(foreign=True, dims='zoo',
+                            description='foreign ref to zoo size grid')
+    theta_opt = xso.parameter(
+        description='optimal predator:prey size ratio (kernel peak)')
+    sigma_log = xso.parameter(
+        description='kernel width in log10(ESD) space')
+
+    phiPZ = xso.parameter(dims=('full', 'zoo'), setup_func='phiPZ_setup',
+                          description='feeding preference matrix (prey x predator)')
+
+    Imax = xso.parameter(dims='zoo', description='maximum ingestion rates')
+    KsZ = xso.parameter(description='half-saturation of Type III grazing response')
+
+    def phiPZ_setup(self, phyto_esd, zoo_esd, theta_opt, sigma_log):
+        return compute_grazing_kernel(phyto_esd, zoo_esd, theta_opt, sigma_log)
+
+    @xso.flux(group='graze_matrix', dims=('full', 'zoo'))
+    def grazing(self, resource, consumer, phiPZ, Imax, KsZ):
+        biomass = self.m.concatenate((resource, consumer))
+        S_prey = self.m.sum(phiPZ * biomass[:, None], axis=0)
+        FgrazMatrix = (Imax * consumer
+                       * phiPZ * biomass[:, None]
+                       * S_prey
+                       / (S_prey ** 2 + KsZ ** 2))
+        return FgrazMatrix
 # =============================================================================
 # GGE WITH DETRITUS ROUTING
 # =============================================================================
