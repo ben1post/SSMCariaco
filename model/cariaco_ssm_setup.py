@@ -20,7 +20,7 @@ from cariaco_ssm_comps import (
     SizebasedGrazingMatrix_Full_TypeIII,
     FishGrazing_Kernel,
     Detritus,
-    GGE_Full_SizeDep_withD,
+    GGE_Full_withD,
     PhytoMortality_toD_toN,
     ZooQuadraticMortality_toD,
     DetritusRemineralization,
@@ -207,7 +207,7 @@ m_P          = 0.1 * mu_max
 m_P_recycled = 1.0
 
 I_max = compute_I_max(zoo_esd)
-gge   = compute_gge(zoo_esd)
+gge   = 0.25
 m_Z   = 0.1
 KsZ   = 3.0
 
@@ -244,7 +244,7 @@ model = xso.create({
     'Inflow':         StockNutrientSupply,
     'Growth':         MonodGrowth_SizeBased,
     'Grazing':        SizebasedGrazingMatrix_Full_TypeIII,
-    'GGE':            GGE_Full_SizeDep_withD,
+    'GGE':            GGE_Full_withD,
     'PhytoMortality': PhytoMortality_toD_toN,
     'ZooMortality':   ZooQuadraticMortality_toD,
     'DetritusRemin':  DetritusRemineralization,

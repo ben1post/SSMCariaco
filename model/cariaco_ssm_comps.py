@@ -254,7 +254,7 @@ class SizebasedGrazingMatrix_Full_TypeIII:
 # =============================================================================
 
 @xso.component
-class GGE_Full_SizeDep_withD:
+class GGE_Full_withD:
     """Routes grazing fluxes with size-dependent GGE, splitting losses
     between detritus and nutrient recycling.
 
@@ -280,8 +280,7 @@ class GGE_Full_SizeDep_withD:
     egested_detritus = xso.variable(foreign=True, flux='egestion_to_D')
     excreted_nutrient = xso.variable(foreign=True, flux='excretion_to_N')
 
-    gge = xso.parameter(dims='zoo',
-                        description='size-dependent gross growth efficiency')
+    gge = xso.parameter(description='size-dependent gross growth efficiency')
     f_egest_D = xso.parameter(
         description='fraction of non-assimilated ingestion routed to D '
                     '(remainder goes to N as sloppy feeding / DOM)')
