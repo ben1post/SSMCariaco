@@ -133,6 +133,174 @@ def plot_cost_heatmap(cost_grid, vals1, vals2, p1_label, p2_label,
 
 
 # =============================================================================
+# 1B. SPECTRUM COMPOSITION MAP (RGB)
+# =============================================================================
+def plot_spectrum_composition_map(
+    model_grid, obs_vec, bin_definitions,
+    vals1, vals2, p1_label, p2_label,
+    *,
+    type_filter='phyto',
+    best=None, spectrum_best=None, default=None,
+    contour_levels=(0.05, 0.10, 0.20, 0.40),
+    gamma=0.5, figsize=(10, 7),
+):
+    """
+    RGB composition map of one target type across a 2D parameter scan.
+
+    Each pixel of the (n1, n2) parameter plane is coloured by the model's
+    *relative* composition across the three targets of ``type_filter``.
+    For ``type_filter='phyto'`` the channels are Pico (R), Nano (G),
+    Micro (B). Pixel brightness is gamma-corrected closeness of the
+    modelled composition to the observed composition (bright = match).
+
+    Overlays:
+      - White contours of the relative-composition distance
+        (the value computed by ``compute_cost_relative_spectrum``).
+      - Optional NRMSRE best-fit marker (yellow star).
+      - Optional spectrum-only best-fit marker (magenta plus).
+      - Optional default-parameter marker (cyan diamond).
+
+    Parameters
+    ----------
+    model_grid : np.ndarray, shape (n1, n2, n_targets)
+        Per-cell aggregated target vectors from ``compute_cost_grid``.
+    obs_vec : np.ndarray, shape (n_targets,)
+    bin_definitions : list of dict
+    vals1, vals2 : arrays
+        Parameter values along dim1 (y-axis) and dim2 (x-axis), same
+        convention as ``plot_cost_heatmap``.
+    p1_label, p2_label : str
+    type_filter : str, optional
+        Target type whose composition drives the RGB map. Must have
+        exactly 3 targets in ``bin_definitions``. Default ``'phyto'``.
+    best : dict or None
+        Output of ``find_best_fit`` on the NRMSRE cost grid; plotted
+        as a yellow star. Optional.
+    spectrum_best : dict or None
+        Output of ``find_best_fit`` on the spectrum-only cost grid;
+        plotted as a magenta plus. Optional.
+    default : dict or None
+        ``{'val1': float, 'val2': float}`` for default-parameter marker.
+        Optional.
+    contour_levels : tuple of float, optional
+        Levels for the distance contour overlay. Range 0..sqrt(2).
+    gamma : float, optional
+        Gamma exponent for the brightness encoding. Lower flattens
+        contrast; default 0.5 follows the prototype.
+    figsize : tuple, optional
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    """
+    from matplotlib.patches import Patch
+
+    idx = [i for i, b in enumerate(bin_definitions)
+           if b['type'] == type_filter]
+    if len(idx) != 3:
+        raise ValueError(
+            f"plot_spectrum_composition_map needs exactly 3 targets of "
+            f"type '{type_filter}' in bin_definitions, found {len(idx)}."
+        )
+    labels = [bin_definitions[i]['label'] for i in idx]
+
+    # Relative composition per cell over the filtered targets
+    sub = np.asarray(model_grid)[:, :, idx]
+    totals = sub.sum(axis=-1, keepdims=True)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        rel = np.where(totals > 0, sub / totals, np.nan)
+
+    # Observed composition (constant across the plane)
+    obs_sub = np.asarray(obs_vec, dtype=float)[idx]
+    obs_rel = obs_sub / obs_sub.sum()
+
+    # Distance to obs composition per cell
+    dist = np.linalg.norm(rel - obs_rel, axis=-1)
+
+    # Brightness: bright where dist is small. Gamma-corrected, normalised
+    # to the 95th percentile to keep the dynamic range bounded.
+    dist_max = np.nanpercentile(dist, 95)
+    if not np.isfinite(dist_max) or dist_max <= 0:
+        brightness = np.zeros_like(dist)
+    else:
+        brightness = (1.0 - np.clip(dist, 0, dist_max) / dist_max) ** gamma
+
+    rgb = np.nan_to_num(rel * brightness[..., None], nan=0.0)
+    rgb = np.clip(rgb, 0.0, 1.0)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.imshow(
+        rgb, origin='lower', aspect='auto',
+        extent=[vals2.min(), vals2.max(), vals1.min(), vals1.max()],
+        zorder=1,
+    )
+
+    X, Y = np.meshgrid(vals2, vals1)
+    dist_max_overall = np.nanmax(dist) if np.any(np.isfinite(dist)) else 0.0
+    valid_levels = [l for l in contour_levels if l <= dist_max_overall]
+    if valid_levels:
+        cs = ax.contour(
+            X, Y, dist, levels=valid_levels,
+            colors='white', linewidths=1.2, alpha=0.85, zorder=3,
+        )
+        ax.clabel(cs, fmt='%.2f', fontsize=8)
+
+    legend_handles = [
+        Patch(facecolor='red',   label=f'{labels[0]} dominates'),
+        Patch(facecolor='green', label=f'{labels[1]} dominates'),
+        Patch(facecolor='blue',  label=f'{labels[2]} dominates'),
+        Patch(facecolor='white', edgecolor='grey',
+              label='Contour: rel-comp distance'),
+    ]
+
+    if best is not None:
+        ax.plot(
+            best['val2'], best['val1'], '*',
+            color='yellow', markersize=18, markeredgecolor='black',
+            markeredgewidth=1.0, zorder=5,
+        )
+        legend_handles.append(plt.Line2D(
+            [], [], marker='*', linestyle='', color='yellow',
+            markeredgecolor='black', markersize=14,
+            label=f"NRMSRE best (cost={best['cost']:.3f})",
+        ))
+    if spectrum_best is not None:
+        ax.plot(
+            spectrum_best['val2'], spectrum_best['val1'], 'P',
+            color='magenta', markersize=14, markeredgecolor='black',
+            markeredgewidth=1.0, zorder=5,
+        )
+        legend_handles.append(plt.Line2D(
+            [], [], marker='P', linestyle='', color='magenta',
+            markeredgecolor='black', markersize=12,
+            label=f"Spectrum best (dist={spectrum_best['cost']:.3f})",
+        ))
+    if default is not None:
+        ax.plot(
+            default['val2'], default['val1'], 'D',
+            color='cyan', markersize=10, markeredgecolor='black',
+            markeredgewidth=1.0, zorder=5,
+        )
+        legend_handles.append(plt.Line2D(
+            [], [], marker='D', linestyle='', color='cyan',
+            markeredgecolor='black', markersize=10,
+            label='Default params',
+        ))
+
+    ax.set_xlabel(p2_label, fontsize=12)
+    ax.set_ylabel(p1_label, fontsize=12)
+    ax.set_title(
+        f'{type_filter.capitalize()} composition map\n'
+        f'R = {labels[0]}, G = {labels[1]}, B = {labels[2]}; '
+        f'brightness = match to obs composition',
+        fontsize=11,
+    )
+    ax.legend(handles=legend_handles, loc='lower right', fontsize=9)
+    plt.tight_layout()
+    return fig
+
+
+# =============================================================================
 # 2. MODEL vs OBS — BAR CHART
 # =============================================================================
 def plot_model_vs_obs_bars(model_vec, obs_vec, bin_definitions,

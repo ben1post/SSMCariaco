@@ -174,6 +174,62 @@ def compute_cost_nrmsre(model_vec, obs_vec):
     return np.sqrt(np.mean(log_errors ** 2))
 
 
+def compute_cost_relative_spectrum(model_vec, obs_vec, bin_definitions,
+                                   type_filter='phyto'):
+    """
+    Euclidean distance between relative-composition vectors of one target type.
+
+    Restricts attention to targets whose ``type`` field equals ``type_filter``
+    (default: ``'phyto'``), normalises the model and obs sub-vectors to sum
+    to 1, and returns the Euclidean distance between them. Insensitive to
+    total biomass — measures *spectrum slope* only.
+
+        cost = || m / sum(m)  -  o / sum(o) ||_2
+
+    Range: 0 (perfect composition match) to sqrt(2) (orthogonal
+    compositions, e.g. all-Pico vs all-Micro). Returns NaN if either the
+    model or the obs sub-vector sums to a non-positive value.
+
+    Intended as a *secondary* cost alongside ``compute_cost_nrmsre``: the
+    NRMSRE captures absolute magnitudes across all targets, while this
+    function isolates the size-spectrum slope of a single target type so
+    the trade-off between magnitude fit and slope fit can be inspected.
+
+    Parameters
+    ----------
+    model_vec, obs_vec : array-like, shape (n_targets,)
+        Full target vectors as built by ``aggregate_model_to_targets`` /
+        ``load_cariaco_targets``. Same length and target ordering.
+    bin_definitions : list of dict
+        Bin definitions used to build the target vectors. Required so the
+        function knows which entries correspond to ``type_filter``.
+    type_filter : str, optional
+        Target type whose relative composition is scored. Default
+        ``'phyto'`` (Pico / Nano / Micro slope).
+
+    Returns
+    -------
+    cost : float
+        Euclidean distance between normalised composition vectors, or NaN
+        if model or obs sums to a non-positive value.
+    """
+    idx = [i for i, b in enumerate(bin_definitions)
+           if b['type'] == type_filter]
+    if len(idx) < 2:
+        raise ValueError(
+            f"compute_cost_relative_spectrum needs at least 2 targets of "
+            f"type '{type_filter}' in bin_definitions, found {len(idx)}."
+        )
+    m = np.asarray(model_vec, dtype=float)[idx]
+    o = np.asarray(obs_vec, dtype=float)[idx]
+    m_sum, o_sum = m.sum(), o.sum()
+    if not np.isfinite(m_sum) or not np.isfinite(o_sum):
+        return np.nan
+    if m_sum <= 0 or o_sum <= 0:
+        return np.nan
+    return float(np.linalg.norm(m / m_sum - o / o_sum))
+
+
 # =============================================================================
 # SHARED CELL-ITERATION HELPER
 # =============================================================================
@@ -472,7 +528,64 @@ def compute_cost_grid(
         clip_small_negatives=clip_small_negatives,
     )
 
-    
+
+def compute_spectrum_cost_grid(model_grid, obs_vec, bin_definitions,
+                               type_filter='phyto'):
+    """
+    Reduce a (n1, n2, n_targets) model_grid to a (n1, n2) spectrum-only
+    cost grid, scoring each cell's *relative composition* against obs.
+
+    Operates on the post-processed ``model_grid`` produced by
+    ``compute_cost_grid`` — does not re-run the scan or read the parent
+    ``results_ds``. Cells that already failed in the parent scan
+    (NaN / non-finite entries in the per-cell model_vec) are propagated
+    as NaN.
+
+    The same NaN footprint as the parent NRMSRE ``cost_grid`` is
+    therefore preserved: cells masked-out upstream stay masked-out here.
+
+    Parameters
+    ----------
+    model_grid : np.ndarray, shape (n1, n2, n_targets)
+        Per-cell aggregated target vectors from ``compute_cost_grid``.
+    obs_vec : np.ndarray, shape (n_targets,)
+    bin_definitions : list of dict
+        Same definitions used to build ``model_grid``.
+    type_filter : str, optional
+        Target type whose relative composition is scored, passed through
+        to ``compute_cost_relative_spectrum``. Default ``'phyto'``.
+
+    Returns
+    -------
+    spectrum_cost_grid : np.ndarray, shape (n1, n2)
+        Relative-composition distance per cell; NaN where the parent
+        model_vec contained any NaN/inf or summed to <= 0 over the
+        filtered targets.
+
+    See Also
+    --------
+    compute_cost_relative_spectrum : per-cell scoring used internally
+    compute_cost_grid : produces the ``model_grid`` consumed here
+    """
+    model_grid = np.asarray(model_grid)
+    if model_grid.ndim != 3:
+        raise ValueError(
+            f"model_grid must be 3-D (n1, n2, n_targets); got shape "
+            f"{model_grid.shape}."
+        )
+    n1, n2, _ = model_grid.shape
+    grid = np.full((n1, n2), np.nan)
+    for i in range(n1):
+        for j in range(n2):
+            mv = model_grid[i, j, :]
+            if not np.all(np.isfinite(mv)):
+                continue
+            grid[i, j] = compute_cost_relative_spectrum(
+                mv, obs_vec, bin_definitions, type_filter=type_filter,
+            )
+    return grid
+
+
 # =============================================================================
 # BEST-FIT EXTRACTION
 # =============================================================================
