@@ -197,8 +197,8 @@ n_classes = 12
 phyto_esd = generate_size_classes(n_classes, esd_min=0.5, esd_max=200)
 zoo_esd   = generate_size_classes(n_classes, esd_min=5, esd_max=2000)
 
-phyto_init = np.full(n_classes, 0.01)
-zoo_init   = np.full(n_classes, 0.001)
+phyto_init = np.full(n_classes, 0.001)
+zoo_init   = np.full(n_classes, 0.0001)
 N_init     = 0.1
 
 mu_max       = compute_mu_max_maranon(phyto_esd)
