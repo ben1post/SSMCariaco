@@ -489,37 +489,67 @@ integrate_hplc <- function(hplc_profiles, cutoffs, na_threshold = 10) {
   hplc_integrated <- hplc_integrated %>%
     mutate(
       # Diagnostic pigment sum (using integrated values)
-      DP2 = 1.41 * Fuco_integrated + 1.41 * Perid_integrated + 
-            0.60 * Allo_integrated + 0.35 * But_fuco_integrated + 
-            1.27 * Hex_fuco_integrated + 0.86 * Zea_integrated + 
+      DP2 = 1.41 * Fuco_integrated + 1.41 * Perid_integrated +
+            0.60 * Allo_integrated + 0.35 * But_fuco_integrated +
+            1.27 * Hex_fuco_integrated + 0.86 * Zea_integrated +
             1.01 * Tot_Chl_b_integrated,
       DP2 = ifelse(DP2 < 0.001, NA, DP2),
-      
-      # Relative size fractions
+
+      # Pigment-based size fractions (Vidussi 1999)
       micro = (1.41 * Fuco_integrated + 1.41 * Perid_integrated) / DP2,
-      nano  = (0.60 * Allo_integrated + 0.35 * But_fuco_integrated + 
+      nano  = (0.60 * Allo_integrated + 0.35 * But_fuco_integrated +
                1.27 * Hex_fuco_integrated) / DP2,
       pico  = (0.86 * Zea_integrated + 1.01 * Tot_Chl_b_integrated) / DP2,
-      
-      # Absolute biomass (integrated Chl a partitioned by size)
+
+      # ── Biomass-weighted fractions and metrics (TotChlA-independent) ────────────
+      # Intermediate: per-class C weight = pigment_fraction × class-specific C:Chl.
+      # The multiplier (Tot_Chl_a / depth_cutoff / MW_C × Redfield) that would convert
+      # these to mmol N is a class-INDEPENDENT scalar, so it cancels when forming
+      # biomass fractions or per-class log-ratios. Centroid / Shannon / slope can
+      # therefore be computed from pigment fractions alone, available for all months
+      # where the diagnostic pigments resolve — independent of whether Tot_Chl_a or
+      # depth_cutoff is present.
+      micro_Cw = micro * C_TO_CHL_MICRO,
+      nano_Cw  = nano  * C_TO_CHL_NANO,
+      pico_Cw  = pico  * C_TO_CHL_PICO,
+      total_Cw = micro_Cw + nano_Cw + pico_Cw,
+
+      # Biomass-based size fractions (used for centroid and Shannon)
+      micro_frac_N = ifelse(total_Cw > 0, micro_Cw / total_Cw, NA_real_),
+      nano_frac_N  = ifelse(total_Cw > 0, nano_Cw  / total_Cw, NA_real_),
+      pico_frac_N  = ifelse(total_Cw > 0, pico_Cw  / total_Cw, NA_real_),
+
+      # Size spectral metrics — biomass-based since Sathyendranath C:Chl refactor (2026-05-12);
+      # were pigment-based pre-refactor (size_centroid based on `micro`/`nano`/`pico`).
+      size_centroid = micro_frac_N * log10(63) + nano_frac_N * log10(6.3) + pico_frac_N * log10(0.63),
+
+      size_shannon = -(ifelse(micro_frac_N > 0, micro_frac_N * log(micro_frac_N), 0) +
+                       ifelse(nano_frac_N  > 0, nano_frac_N  * log(nano_frac_N),  0) +
+                       ifelse(pico_frac_N  > 0, pico_frac_N  * log(pico_frac_N),  0)),
+
+      # nbss_slope uses the C-weighted shares (mathematically equivalent to using
+      # micro_mmolN / pico_mmolN; the scalar K cancels in the log-ratio).
+      nbss_slope = ifelse(
+        micro_Cw > 0 & pico_Cw > 0,
+        (log10(micro_Cw) - log10(pico_Cw)) / (log10(63) - log10(0.63)),
+        NA_real_
+      ),
+
+      # ── Absolute biomass (depends on Tot_Chl_a_integrated and depth_cutoff) ─────
+      # Per-class Chl absolutes (mg Chl m⁻², integrated)
       micro_abs = micro * Tot_Chl_a_integrated,
       nano_abs  = nano * Tot_Chl_a_integrated,
       pico_abs  = pico * Tot_Chl_a_integrated,
-      
-      # Size spectral metrics
-      size_centroid = micro * log10(63) + nano * log10(6.3) + pico * log10(0.63),
-      
-      size_shannon = -(ifelse(micro > 0, micro * log(micro), 0) +
-                       ifelse(nano > 0, nano * log(nano), 0) +
-                       ifelse(pico > 0, pico * log(pico), 0)),
-      
-      nbss_slope = ifelse(
-        micro_abs > 0 & pico_abs > 0,
-        (log10(micro_abs) - log10(pico_abs)) / (log10(63) - log10(0.63)),
-        NA_real_
-      )
+
+      # Per-class biomass (mmol N m⁻³) using size-class-specific C:Chl.
+      # Returns NA whenever Tot_Chl_a_integrated or depth_cutoff is missing; that
+      # does NOT propagate to the dimensionless metrics above.
+      micro_mmolN = chl_to_mmolN(micro_abs, depth_cutoff, C_TO_CHL_MICRO),
+      nano_mmolN  = chl_to_mmolN(nano_abs,  depth_cutoff, C_TO_CHL_NANO),
+      pico_mmolN  = chl_to_mmolN(pico_abs,  depth_cutoff, C_TO_CHL_PICO),
+      total_phyto_mmolN = micro_mmolN + nano_mmolN + pico_mmolN
     )
-  
+
   return(hplc_integrated)
 }
 
@@ -635,19 +665,34 @@ compare_integration_strategies <- function(profile_data,
 # =============================================================================
 
 # Unit conversion constants (matching Python cariaco_obs.py)
-C_TO_CHL     <- 50.0      # mg C : mg Chl
-C_TO_DW      <- 0.4       # mg C : mg DW (zooplankton)
-REDFIELD_N_C <- 16 / 106  # mmol N : mmol C
-MW_CARBON    <- 12.01     # g mol⁻¹
-MW_N         <- 14.007    # g mol⁻¹
+#
+# Size-class-specific phytoplankton C:Chl ratios from Sathyendranath et al. (2009)
+# "Carbon-to-chlorophyll ratio and growth rate of phytoplankton in the sea"
+# MEPS 383:73-84, Table 4 HPLC column. Per-size-class assignment via Vidussi (1999)
+# diagnostic pigment mapping:
+#   Micro (Fuco + Perid): diatoms (HPLC 56) + dinoflagellates (HPLC 45) → ~50
+#   Nano  (Allo + But_fuco + Hex_fuco): prymnesiophytes (HPLC 85) → 85
+#   Pico  (Zea + Tot_Chl_b): cyanobacteria (HPLC 130) + green algae (HPLC 137)
+#                            + Prochlorococcus (HPLC 145) → 130
+C_TO_CHL_MICRO <- 50.0    # mg C : mg Chl, Sathyendranath 2009 HPLC, diatoms+dinos mean
+C_TO_CHL_NANO  <- 85.0    # mg C : mg Chl, Sathyendranath 2009 HPLC, prymnesiophytes
+C_TO_CHL_PICO  <- 130.0   # mg C : mg Chl, Sathyendranath 2009 HPLC, cyanobacteria-dominant
+C_TO_CHL       <- 50.0    # Legacy uniform value; retained for non-size-resolved Niskin Chl
+C_TO_DW        <- 0.4     # mg C : mg DW (zooplankton)
+REDFIELD_N_C   <- 16 / 106  # mmol N : mmol C
+MW_CARBON      <- 12.01     # g mol⁻¹
+MW_N           <- 14.007    # g mol⁻¹
 
 #' Convert chlorophyll to nitrogen units
 #' @param chl_integrated Integrated chlorophyll (mg Chl m⁻²)
 #' @param depth_cutoff Integration depth (m)
+#' @param c_to_chl C:Chl ratio (mg C / mg Chl). Defaults to legacy C_TO_CHL = 50.
+#'   For size-resolved per-class conversions, pass C_TO_CHL_PICO, C_TO_CHL_NANO,
+#'   or C_TO_CHL_MICRO (Sathyendranath et al. 2009 Table 4 HPLC values).
 #' @return Concentration in mmol N m⁻³
-chl_to_mmolN <- function(chl_integrated, depth_cutoff) {
+chl_to_mmolN <- function(chl_integrated, depth_cutoff, c_to_chl = C_TO_CHL) {
   # mg Chl m⁻² → mg Chl m⁻³ → mg C m⁻³ → mmol C m⁻³ → mmol N m⁻³
-  (chl_integrated / depth_cutoff) * C_TO_CHL / MW_CARBON * REDFIELD_N_C
+  (chl_integrated / depth_cutoff) * c_to_chl / MW_CARBON * REDFIELD_N_C
 }
 
 #' Convert zooplankton dry weight to nitrogen units
@@ -862,55 +907,90 @@ get_full_scenario_data <- function(profile_data,
     ) %>%
     # Calculate size fractions per date
     mutate(
-      DP2 = 1.41 * Fuco_int + 1.41 * Perid_int + 
-            0.60 * Allo_int + 0.35 * But_fuco_int + 
-            1.27 * Hex_fuco_int + 0.86 * Zea_int + 
+      DP2 = 1.41 * Fuco_int + 1.41 * Perid_int +
+            0.60 * Allo_int + 0.35 * But_fuco_int +
+            1.27 * Hex_fuco_int + 0.86 * Zea_int +
             1.01 * Tot_Chl_b_int,
       DP2 = ifelse(DP2 < 0.001, NA, DP2),
-      
+
+      # Pigment-based size fractions (Vidussi 1999)
       micro = (1.41 * Fuco_int + 1.41 * Perid_int) / DP2,
       nano  = (0.60 * Allo_int + 0.35 * But_fuco_int + 1.27 * Hex_fuco_int) / DP2,
       pico  = (0.86 * Zea_int + 1.01 * Tot_Chl_b_int) / DP2,
-      
+
+      # ── Biomass-weighted fractions and metrics (TotChlA-independent) ────────────
+      # Intermediate: per-class C weight = pigment_fraction × class-specific C:Chl.
+      # The multiplier (Tot_Chl_a / depth_cutoff / MW_C × Redfield) that would convert
+      # these to mmol N is a class-INDEPENDENT scalar, so it cancels when forming
+      # biomass fractions or per-class log-ratios. Centroid / Shannon / slope can
+      # therefore be computed from pigment fractions alone, available for all months
+      # where the diagnostic pigments resolve — independent of whether Tot_Chl_a or
+      # depth_cutoff is present.
+      micro_Cw = micro * C_TO_CHL_MICRO,
+      nano_Cw  = nano  * C_TO_CHL_NANO,
+      pico_Cw  = pico  * C_TO_CHL_PICO,
+      total_Cw = micro_Cw + nano_Cw + pico_Cw,
+
+      # Biomass-based size fractions (used for centroid and Shannon)
+      micro_frac_N = ifelse(total_Cw > 0, micro_Cw / total_Cw, NA_real_),
+      nano_frac_N  = ifelse(total_Cw > 0, nano_Cw  / total_Cw, NA_real_),
+      pico_frac_N  = ifelse(total_Cw > 0, pico_Cw  / total_Cw, NA_real_),
+
+      # Size spectral metrics — biomass-based since Sathyendranath C:Chl refactor (2026-05-12);
+      # were pigment-based pre-refactor (size_centroid based on `micro`/`nano`/`pico`).
+      size_centroid = micro_frac_N * log10(63) + nano_frac_N * log10(6.3) + pico_frac_N * log10(0.63),
+      size_shannon = -(ifelse(micro_frac_N > 0, micro_frac_N * log(micro_frac_N), 0) +
+                       ifelse(nano_frac_N  > 0, nano_frac_N  * log(nano_frac_N),  0) +
+                       ifelse(pico_frac_N  > 0, pico_frac_N  * log(pico_frac_N),  0)),
+
+      # nbss_slope uses the C-weighted shares (mathematically equivalent to using
+      # micro_mmolN / pico_mmolN; the scalar K cancels in the log-ratio).
+      nbss_slope = ifelse(
+        micro_Cw > 0 & pico_Cw > 0,
+        (log10(micro_Cw) - log10(pico_Cw)) / (log10(63) - log10(0.63)),
+        NA_real_
+      ),
+
+      # ── Absolute biomass (depends on Tot_Chl_a_int and depth_cutoff) ────────────
+      # Per-class Chl absolutes (mg Chl m⁻², integrated)
       micro_abs = micro * Tot_Chl_a_int,
       nano_abs  = nano * Tot_Chl_a_int,
       pico_abs  = pico * Tot_Chl_a_int,
-      
-      # Convert to model units (mmol N m⁻³)
-      # Total Chlorophyll a: directly from Tot_Chl_a
-      TotChlA_mmolN = chl_to_mmolN(Tot_Chl_a_int, depth_cutoff),
-        
-      # Size classes: partitioned from total
-      micro_mmolN = chl_to_mmolN(micro_abs, depth_cutoff),
-      nano_mmolN  = chl_to_mmolN(nano_abs, depth_cutoff),
-      pico_mmolN  = chl_to_mmolN(pico_abs, depth_cutoff),
-      
-      size_centroid = micro * log10(63) + nano * log10(6.3) + pico * log10(0.63),
-      size_shannon = -(ifelse(micro > 0, micro * log(micro), 0) +
-                       ifelse(nano > 0, nano * log(nano), 0) +
-                       ifelse(pico > 0, pico * log(pico), 0)),
-      nbss_slope = ifelse(
-        micro_abs > 0 & pico_abs > 0,
-        (log10(micro_abs) - log10(pico_abs)) / (log10(63) - log10(0.63)),
-        NA_real_
-      )
+
+      # Per-class biomass (mmol N m⁻³) using size-class-specific C:Chl
+      # (Sathyendranath et al. 2009 Table 4 HPLC; assignment by Vidussi pigment group).
+      # NA whenever Tot_Chl_a_int or depth_cutoff is missing; does NOT propagate
+      # to the dimensionless metrics above.
+      micro_mmolN = chl_to_mmolN(micro_abs, depth_cutoff, C_TO_CHL_MICRO),
+      nano_mmolN  = chl_to_mmolN(nano_abs,  depth_cutoff, C_TO_CHL_NANO),
+      pico_mmolN  = chl_to_mmolN(pico_abs,  depth_cutoff, C_TO_CHL_PICO),
+      TotChlA_mmolN = micro_mmolN + nano_mmolN + pico_mmolN
     )
   
   # Aggregate to monthly
   hplc_monthly <- hplc_integrated %>%
     group_by(time_month) %>%
     summarize(
-      # Total Chlorophyll a
+      # Total phyto biomass (now sum of per-class under size-resolved C:Chl)
       TotChlA_mmolN = mean(TotChlA_mmolN, na.rm = TRUE),
-      
-      # Size classes
+
+      # Size classes (biomass in mmol N m⁻³)
       micro_mmolN = mean(micro_mmolN, na.rm = TRUE),
       nano_mmolN = mean(nano_mmolN, na.rm = TRUE),
       pico_mmolN = mean(pico_mmolN, na.rm = TRUE),
-        
+
+      # Pigment-based fractions (Vidussi 1999, kept for diagnostic comparison)
       micro_frac = mean(micro, na.rm = TRUE),
       nano_frac = mean(nano, na.rm = TRUE),
       pico_frac = mean(pico, na.rm = TRUE),
+
+      # Biomass-based fractions (used by size_centroid / size_shannon under
+      # size-resolved Sathyendranath 2009 C:Chl)
+      micro_frac_N = mean(micro_frac_N, na.rm = TRUE),
+      nano_frac_N  = mean(nano_frac_N,  na.rm = TRUE),
+      pico_frac_N  = mean(pico_frac_N,  na.rm = TRUE),
+
+      # Size spectrum metrics — biomass-based since 2026-05-12 refactor
       size_centroid = mean(size_centroid, na.rm = TRUE),
       size_shannon = mean(size_shannon, na.rm = TRUE),
       nbss_slope = mean(nbss_slope, na.rm = TRUE),
@@ -1214,20 +1294,25 @@ get_scenario_metadata <- function() {
     "ui",                 "category",          "Detailed upwelling index",
     "Based on T at 50m: ≤20°C strong, ≤21°C moderate, ≤22°C weak, >22°C relaxed",
     
-    # Phytoplankton (HPLC-derived)
-# Phytoplankton (HPLC-derived)
-    "TotChlA_mmolN",      "mmol N m⁻³",        "Total Chlorophyll a",                             "HPLC Tot_Chl_a integrated to depth_cutoff, converted: (mg Chl / depth) × 50 / 12.01 × (16/106)",
-    "micro_mmolN",        "mmol N m⁻³",        "Microphytoplankton (>20 µm) Chl a",               "Tot_Chl_a partitioned by diagnostic pigment fractions, then converted to mmol N",
-    "nano_mmolN",         "mmol N m⁻³",        "Nanophytoplankton (2-20 µm) Chl a",               "Same as micro_mmolN",
-    "pico_mmolN",         "mmol N m⁻³",        "Picophytoplankton (<2 µm) Chl a",                 "Same as micro_mmolN",
-    "micro_frac",         "dimensionless",     "Microphytoplankton fraction of total",            "From diagnostic pigment ratios",
-    "nano_frac",          "dimensionless",     "Nanophytoplankton fraction of total",             "From diagnostic pigment ratios",
-    "pico_frac",          "dimensionless",     "Picophytoplankton fraction of total",             "From diagnostic pigment ratios",
+    # Phytoplankton (HPLC-derived; size-resolved biomass under Sathyendranath 2009 C:Chl)
+    "TotChlA_mmolN",      "mmol N m⁻³",        "Total phytoplankton biomass",                     "Sum of micro_mmolN + nano_mmolN + pico_mmolN (size-resolved biomass under Sathyendranath 2009 C:Chl). Pre-2026-05-12 refactor: directly from Tot_Chl_a × uniform C:Chl=50.",
+    "micro_mmolN",        "mmol N m⁻³",        "Microphytoplankton (>20 µm) biomass",             "Tot_Chl_a × micro_frac × C:Chl_Micro=50 (diatoms+dinos, Sathyendranath 2009 Table 4 HPLC) / 12.01 × (16/106)",
+    "nano_mmolN",         "mmol N m⁻³",        "Nanophytoplankton (2-20 µm) biomass",             "Tot_Chl_a × nano_frac × C:Chl_Nano=85 (prymnesiophytes, Sathyendranath 2009) / 12.01 × (16/106)",
+    "pico_mmolN",         "mmol N m⁻³",        "Picophytoplankton (<2 µm) biomass",               "Tot_Chl_a × pico_frac × C:Chl_Pico=130 (cyanobacteria/Prochlorococcus, Sathyendranath 2009) / 12.01 × (16/106)",
+    "micro_frac",         "dimensionless",     "Microphytoplankton pigment fraction",             "From Vidussi 1999 diagnostic pigment ratios (Chl-based, not biomass)",
+    "nano_frac",          "dimensionless",     "Nanophytoplankton pigment fraction",              "From Vidussi 1999 diagnostic pigment ratios (Chl-based, not biomass)",
+    "pico_frac",          "dimensionless",     "Picophytoplankton pigment fraction",              "From Vidussi 1999 diagnostic pigment ratios (Chl-based, not biomass)",
+    "micro_frac_N",       "dimensionless",     "Microphytoplankton biomass fraction",             "micro_mmolN / TotChlA_mmolN. Used by size_centroid and size_shannon.",
+    "nano_frac_N",        "dimensionless",     "Nanophytoplankton biomass fraction",              "nano_mmolN / TotChlA_mmolN. Used by size_centroid and size_shannon.",
+    "pico_frac_N",        "dimensionless",     "Picophytoplankton biomass fraction",              "pico_mmolN / TotChlA_mmolN. Used by size_centroid and size_shannon.",
+    "size_centroid",      "dimensionless",     "Biomass-weighted log10(ESD) centroid",            "Σ (biomass fraction × log10(bin geomean ESD)) over Pico/Nano/Micro. Biomass-based since 2026-05-12 refactor (was Chl-based).",
+    "size_shannon",       "dimensionless",     "Shannon evenness of 3-bin biomass",               "-Σ p·ln(p) on biomass fractions. Max = ln(3) ≈ 1.099. Biomass-based since 2026-05-12 refactor.",
+    "nbss_slope",         "dimensionless",     "2-point biomass spectrum slope (Pico ↔ Micro)",  "(log10(micro_mmolN) - log10(pico_mmolN)) / (log10(63) - log10(0.63)). Biomass-based since 2026-05-12 refactor.",
 
     "PP_mmolN_m3_d",    "mmol N m⁻³ d⁻¹",  "Primary productivity, volumetric N",              "Niskin PP [mgC m⁻³ h⁻¹] × 12 / 12.01 × (16/106). Native volumetric — no depth division needed. For direct comparison with model phyto uptake flux.",
     "Chl_niskin_mgm3",  "mg m⁻³",          "Niskin fluorometric chlorophyll (depth-mean)",    "Interpolated Niskin Chlorophyll, mean over 0-depth_cutoff. Raw units.",
     "Phaeo_niskin_mgm3","mg m⁻³",          "Niskin phaeopigments (depth-mean)",               "Interpolated Niskin Phaeopigments, mean over 0-depth_cutoff. Raw units.",
-    "Chl_niskin_mmolN", "mmol N m⁻³",      "Niskin chlorophyll in model units",               "Chl_niskin_mgm3 × 50 / 12.01 × (16/106). Uses living-phyto C:Chl=50.",
+    "Chl_niskin_mmolN", "mmol N m⁻³",      "Niskin chlorophyll in model units (Chl-equivalent N)", "Chl_niskin_mgm3 × bulk C:Chl=50 / 12.01 × (16/106). Uses legacy uniform C:Chl=50 because Niskin Chl is not size-resolved. NOT directly comparable to size-resolved phyto biomass (TotChlA_mmolN, *_mmolN) post-2026-05-12 refactor — use as Chl-equivalent reference only.",
     "PhaeoChl_ratio",   "dimensionless",   "Phaeopigment : Chl a ratio (mg/mg)",              "Phaeo_niskin_mgm3 / Chl_niskin_mgm3. Qualitative grazing/senescence diagnostic.",
     
     # Nutrients (Niskin-derived)
@@ -1446,8 +1531,12 @@ summarize_full_scenario_detailed <- function(full_data, include_unclassified = T
   
   cat("\n=== Methodology Notes ===\n")
   cat("  • Upwelling classification: T(50m) ≤ 22°C = upwelling, > 22°C = relaxed\n")
-  cat("  • Phytoplankton: HPLC Chl a → size fractions via diagnostic pigments\n")
-  cat("  • Unit conversion: mg Chl × (C:Chl=50) / 12.01 × (N:C=16/106) → mmol N\n")
+  cat("  • Phytoplankton: HPLC Chl a → size fractions via Vidussi 1999 diagnostic pigments\n")
+  cat("  • Per-class C:Chl from Sathyendranath et al. 2009 Table 4 HPLC:\n")
+  cat(sprintf("      Pico = %.0f, Nano = %.0f, Micro = %.0f (mg C / mg Chl)\n",
+              C_TO_CHL_PICO, C_TO_CHL_NANO, C_TO_CHL_MICRO))
+  cat("  • Unit conversion: mg Chl × (per-class C:Chl) / 12.01 × (N:C=16/106) → mmol N\n")
+  cat("  • Niskin Chl (Chl_niskin_mmolN) still uses bulk C:Chl=50 (not size-resolved)\n")
   cat("  • Zooplankton: mg DW × (C:DW=0.4) / 12.01 × (N:C=16/106) → mmol N\n")
   cat("  • PP: Niskin integrated, ×12 for 12h tropical daylight\n")
   cat("  • Export: 225m trap, duration-weighted monthly means\n")
@@ -1457,4 +1546,128 @@ summarize_full_scenario_detailed <- function(full_data, include_unclassified = T
     coverage = coverage,
     metadata = metadata
   ))
+}
+
+
+# =============================================================================
+# 8. SANITY CHECK — pre- vs post-Sathyendranath refactor envelope comparison
+# =============================================================================
+
+#' Compare pre-refactor (pigment-based) vs post-refactor (biomass-based) envelope
+#'
+#' Sanity check for the 2026-05-12 Sathyendranath C:Chl refactor. Reconstructs
+#' the old pigment-based metrics from the preserved pigment fractions and prints
+#' the per-metric summary (n, mean, median, IQR, range) and the three-era
+#' centroid contrast (pre-collapse < 2005-01-01 / post-collapse 2005–2013 /
+#' recovery ≥ 2014). Useful to verify the refactor's effect direction and
+#' magnitude before committing.
+#'
+#' Note: the pre-refactor metrics are reconstructed from monthly pigment-fraction
+#' means, not per-day-then-averaged. For centroid and Shannon this is exact (the
+#' formulas are linear or near-linear in the fractions); for nbss_slope it is an
+#' approximation that ignores within-month covariance between micro_frac and
+#' Tot_Chl_a. Adequate for the sanity check; if a manuscript-grade comparison is
+#' needed, recompute on the per-date hplc_integrated frame.
+#'
+#' @param monthly_df Monthly data frame from get_full_scenario_data — must
+#'   contain `time_month`, `micro_frac`, `nano_frac`, `pico_frac`, `size_centroid`,
+#'   `size_shannon`, `nbss_slope`.
+#' @return Invisibly, the monthly_df with old_* reconstructed columns appended.
+compare_envelope_old_vs_new <- function(monthly_df) {
+
+  LOG_RATIO  <- log10(63) - log10(0.63)   # = 2.0
+  LOG_MICRO  <- log10(63)
+  LOG_NANO   <- log10(6.3)
+  LOG_PICO   <- log10(0.63)
+  SLOPE_OFFSET_CHL_MINUS_NEW <-
+    log10(C_TO_CHL_PICO / C_TO_CHL_MICRO) / LOG_RATIO
+
+  comp <- monthly_df %>%
+    mutate(
+      # Pre-refactor metrics reconstructed from preserved pigment fractions
+      size_centroid_chl = micro_frac * LOG_MICRO + nano_frac * LOG_NANO + pico_frac * LOG_PICO,
+      size_shannon_chl  = -(ifelse(micro_frac > 0, micro_frac * log(micro_frac), 0) +
+                            ifelse(nano_frac  > 0, nano_frac  * log(nano_frac),  0) +
+                            ifelse(pico_frac  > 0, pico_frac  * log(pico_frac),  0)),
+      # Old Chl-based slope = new biomass-based slope + log10(C:Chl_Pico / C:Chl_Micro) / LOG_RATIO
+      nbss_slope_chl = nbss_slope + SLOPE_OFFSET_CHL_MINUS_NEW
+    )
+
+  # 7-number summary helper
+  summarise_metric <- function(v) {
+    v <- v[!is.na(v)]
+    if (length(v) == 0) return(list(n = 0L, mean = NA_real_, median = NA_real_,
+                                    q25 = NA_real_, q75 = NA_real_,
+                                    min = NA_real_, max = NA_real_))
+    list(n      = length(v),
+         mean   = mean(v),
+         median = median(v),
+         q25    = quantile(v, 0.25, names = FALSE),
+         q75    = quantile(v, 0.75, names = FALSE),
+         min    = min(v),
+         max    = max(v))
+  }
+
+  cat("\n=== Size-spectrum envelope: pigment-based (pre-refactor) vs biomass-based (post) ===\n")
+  cat(sprintf("C:Chl used (Sathyendranath 2009 HPLC): Pico=%g  Nano=%g  Micro=%g\n\n",
+              C_TO_CHL_PICO, C_TO_CHL_NANO, C_TO_CHL_MICRO))
+
+  metric_pairs <- list(
+    c(old = "size_centroid_chl", new = "size_centroid"),
+    c(old = "size_shannon_chl",  new = "size_shannon"),
+    c(old = "nbss_slope_chl",    new = "nbss_slope")
+  )
+
+  for (mp in metric_pairs) {
+    old <- summarise_metric(comp[[mp["old"]]])
+    new <- summarise_metric(comp[[mp["new"]]])
+    cat(sprintf("--- %s ---\n", mp["new"]))
+    cat(sprintf("  old (Chl-based): n=%3d  mean=%+6.3f  median=%+6.3f  IQR=[%+6.3f, %+6.3f]  range=[%+6.3f, %+6.3f]\n",
+                old$n, old$mean, old$median, old$q25, old$q75, old$min, old$max))
+    cat(sprintf("  new (biomass):   n=%3d  mean=%+6.3f  median=%+6.3f  IQR=[%+6.3f, %+6.3f]  range=[%+6.3f, %+6.3f]\n",
+                new$n, new$mean, new$median, new$q25, new$q75, new$min, new$max))
+    cat(sprintf("  Δ (new − old):                  Δmean=%+6.3f  Δmedian=%+6.3f\n\n",
+                new$mean - old$mean, new$median - old$median))
+  }
+
+  # Three-era centroid contrast
+  if ("time_month" %in% names(comp)) {
+    comp <- comp %>%
+      mutate(.date_for_era = as.Date(paste0("01-", time_month), format = "%d-%m-%Y"))
+    if (all(is.na(comp$.date_for_era))) {
+      comp$.date_for_era <- as.Date(paste0(comp$time_month, "-01"), format = "%Y-%m-%d")
+    }
+  } else if ("date" %in% names(comp)) {
+    comp <- comp %>% mutate(.date_for_era = as.Date(date))
+  } else {
+    cat("(no date column found; era contrast skipped)\n")
+    return(invisible(comp))
+  }
+
+  comp <- comp %>%
+    mutate(.era = case_when(
+      .date_for_era <  as.Date("2005-01-01") ~ "pre",
+      .date_for_era <  as.Date("2014-01-01") ~ "post",
+      .date_for_era >= as.Date("2014-01-01") ~ "recovery",
+      TRUE ~ NA_character_
+    ))
+
+  cat("=== Three-era centroid contrast (pre <2005-01-01 / post 2005-2013 / recovery ≥2014) ===\n")
+  for (e in c("pre", "post", "recovery")) {
+    o <- summarise_metric(comp$size_centroid_chl[comp$.era == e & !is.na(comp$.era)])
+    n <- summarise_metric(comp$size_centroid[comp$.era == e & !is.na(comp$.era)])
+    cat(sprintf("  %-9s — old: median=%+6.3f mean=%+6.3f n=%2d  |  new: median=%+6.3f mean=%+6.3f n=%2d\n",
+                e, o$median, o$mean, o$n, n$median, n$mean, n$n))
+  }
+
+  pre_old  <- median(comp$size_centroid_chl[comp$.era == "pre"  & !is.na(comp$.era)], na.rm = TRUE)
+  post_old <- median(comp$size_centroid_chl[comp$.era == "post" & !is.na(comp$.era)], na.rm = TRUE)
+  pre_new  <- median(comp$size_centroid[comp$.era == "pre"  & !is.na(comp$.era)],     na.rm = TRUE)
+  post_new <- median(comp$size_centroid[comp$.era == "post" & !is.na(comp$.era)],     na.rm = TRUE)
+
+  cat(sprintf("\n  Pre−Post centroid contrast: old=%.3f  →  new=%.3f  (Δ=%+.3f)\n",
+              pre_old - post_old, pre_new - post_new,
+              (pre_new - post_new) - (pre_old - post_old)))
+
+  invisible(comp %>% select(-.date_for_era, -.era))
 }
