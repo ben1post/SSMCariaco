@@ -587,6 +587,175 @@ def compute_spectrum_cost_grid(model_grid, obs_vec, bin_definitions,
 
 
 # =============================================================================
+# PHYTO SIZE-SPECTRUM METRICS
+# =============================================================================
+# Cariaco operational bin geomeans (sqrt of operational bin extents
+# 0.2-2 / 2-20 / 20-200 µm). Matches depth_profile_data.r `size_centroid`
+# computation. Override `bin_geomeans` to test alternative conventions.
+CARIACO_PHYTO_BIN_GEOMEANS = np.array([0.63, 6.3, 63.0])
+
+
+def compute_phyto_spectrum_metrics(model_vec, bin_definitions,
+                                   bin_geomeans=None):
+    """Compute Cariaco-side phyto size-spectrum metrics from a model target vector.
+
+    Parallel to ``compute_cost_relative_spectrum`` but returns the metrics
+    themselves (centroid, Shannon evenness, 2-point Pico→Micro slope) rather
+    than a fit cost. The formulas match the Cariaco observation pipeline
+    (R-side ``depth_profile_data.r``, post-2026-05-12 Sathyendranath C:Chl
+    refactor) so the model output is directly comparable to the obs envelope
+    summarised in ``cariaco_monthly_euphotic_dynamic.csv``.
+
+    Restricts attention to bins with ``type='phyto'`` — the three Cariaco
+    Pico / Nano / Micro bins as defined in ``TARGET_BIN_DEFINITIONS``. The
+    canonical ordering (smallest-first) determines which bin is which:
+    first entry = Pico (slope's lower endpoint), last entry = Micro (upper).
+
+    Formulas (biomass-based, matching depth_profile_data.r):
+
+        centroid    = Σ_i p_i · log10(ESD_i)        — biomass-weighted log ESD
+        shannon     = -Σ_i p_i · ln(p_i)            — natural log; max ln(3)
+        nbss_slope  = (log10(B_micro) - log10(B_pico))
+                    / (log10(ESD_micro) - log10(ESD_pico))
+
+    Parameters
+    ----------
+    model_vec : array-like, shape (n_targets,)
+        Per-bin biomass values as produced by ``aggregate_model_to_targets``.
+    bin_definitions : list of dict
+        Same definitions used to build ``model_vec``. Only entries with
+        ``type='phyto'`` are used here; their order in the list determines
+        the fraction order and the slope endpoints.
+    bin_geomeans : array-like, shape (n_phyto,) or None, optional
+        Geometric-mean ESD (µm) for each phyto bin, in the same order as
+        the phyto entries of ``bin_definitions``. Defaults to
+        ``CARIACO_PHYTO_BIN_GEOMEANS`` (= [0.63, 6.3, 63.0]).
+
+    Returns
+    -------
+    metrics : dict
+        Keys ``'centroid'``, ``'shannon'``, ``'nbss_slope'``, ``'fractions'``.
+        Scalar floats except ``'fractions'`` which is a 1-D np.ndarray in
+        phyto-bin order. All return NaN (and fractions all-NaN) if total
+        phyto biomass is non-positive or any phyto bin is non-finite. The
+        slope alone returns NaN if either slope endpoint (first or last
+        bin biomass) is non-positive.
+    """
+    if bin_geomeans is None:
+        bin_geomeans = CARIACO_PHYTO_BIN_GEOMEANS
+    bin_geomeans = np.asarray(bin_geomeans, dtype=float)
+
+    phyto_idx = [i for i, b in enumerate(bin_definitions)
+                 if b['type'] == 'phyto']
+    if len(phyto_idx) != len(bin_geomeans):
+        raise ValueError(
+            f"compute_phyto_spectrum_metrics: bin_definitions has "
+            f"{len(phyto_idx)} phyto entries but bin_geomeans has "
+            f"{len(bin_geomeans)}. Expected matching counts."
+        )
+    if len(phyto_idx) < 2:
+        raise ValueError(
+            f"compute_phyto_spectrum_metrics needs at least 2 phyto bins "
+            f"for the slope endpoint pair, got {len(phyto_idx)}."
+        )
+
+    biomass = np.asarray(model_vec, dtype=float)[phyto_idx]
+
+    nan_result = dict(
+        centroid=np.nan,
+        shannon=np.nan,
+        nbss_slope=np.nan,
+        fractions=np.full(len(phyto_idx), np.nan),
+    )
+
+    if not np.all(np.isfinite(biomass)):
+        return nan_result
+    total = biomass.sum()
+    if total <= 0:
+        return nan_result
+
+    fractions = biomass / total
+    log_esd = np.log10(bin_geomeans)
+
+    centroid = float(np.dot(fractions, log_esd))
+
+    with np.errstate(invalid='ignore', divide='ignore'):
+        shannon_terms = np.where(
+            fractions > 0, fractions * np.log(fractions), 0.0
+        )
+    shannon = float(-shannon_terms.sum())
+
+    B_pico = biomass[0]
+    B_micro = biomass[-1]
+    if B_pico > 0 and B_micro > 0:
+        nbss_slope = float(
+            (np.log10(B_micro) - np.log10(B_pico))
+            / (log_esd[-1] - log_esd[0])
+        )
+    else:
+        nbss_slope = np.nan
+
+    return dict(
+        centroid=centroid,
+        shannon=shannon,
+        nbss_slope=nbss_slope,
+        fractions=fractions,
+    )
+
+
+def compute_phyto_spectrum_metrics_grid(model_grid, bin_definitions,
+                                        bin_geomeans=None):
+    """Reduce a (n1, n2, n_targets) model_grid to per-cell phyto-metric grids.
+
+    Parallel to ``compute_spectrum_cost_grid`` but returns the metrics
+    (centroid, Shannon, nbss_slope) rather than a fit cost. Iterates over
+    cells once and returns all three metrics — cheaper than calling
+    ``compute_phyto_spectrum_metrics`` three times if the caller wants
+    more than one metric.
+
+    Operates on the post-processed ``model_grid`` from ``compute_cost_grid``
+    — does not re-run the scan. NaN footprint is the parent scan's plus any
+    cells where total phyto biomass is non-positive.
+
+    1-D scans: pass a model_grid of shape ``(n1, 1, n_targets)``; the
+    returned grids will have shape ``(n1, 1)``. Or call
+    ``compute_phyto_spectrum_metrics`` directly in a comprehension.
+
+    Parameters
+    ----------
+    model_grid : np.ndarray, shape (n1, n2, n_targets)
+    bin_definitions : list of dict
+    bin_geomeans : array-like or None, optional
+
+    Returns
+    -------
+    grids : dict[str, np.ndarray]
+        Keys ``'centroid'``, ``'shannon'``, ``'nbss_slope'``. Each value is
+        a ``(n1, n2)`` ``np.ndarray``; NaN for failed cells.
+    """
+    model_grid = np.asarray(model_grid)
+    if model_grid.ndim != 3:
+        raise ValueError(
+            f"model_grid must be 3-D (n1, n2, n_targets); got shape "
+            f"{model_grid.shape}."
+        )
+    n1, n2, _ = model_grid.shape
+    grids = {
+        'centroid':   np.full((n1, n2), np.nan),
+        'shannon':    np.full((n1, n2), np.nan),
+        'nbss_slope': np.full((n1, n2), np.nan),
+    }
+    for i in range(n1):
+        for j in range(n2):
+            metrics = compute_phyto_spectrum_metrics(
+                model_grid[i, j, :], bin_definitions, bin_geomeans,
+            )
+            for k in grids:
+                grids[k][i, j] = metrics[k]
+    return grids
+
+
+# =============================================================================
 # BEST-FIT EXTRACTION
 # =============================================================================
 def find_best_fit(cost_grid, model_grid, scan_results, dim1_name, dim2_name):
