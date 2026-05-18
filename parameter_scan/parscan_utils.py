@@ -600,25 +600,32 @@ def compute_spectrum_cost_grid(model_grid, obs_vec, bin_definitions,
 # CARIACO programme reviews (Mueller-Karger 2019). Mirrors
 # `depth_profile_data.r` `size_centroid` geomean weights. Override
 # `bin_geomeans` to test alternative conventions.
-#
-# History: was [0.63, 6.3, 63.0] (Sieburth) before 2026-05-13; briefly set to
-# [1.0, 6.3, 63.0] from 2026-05-13 to 2026-05-15 during a Cariaco-specific
-# 0.5 µm Pico floor exploration; reverted to [0.63, 6.3, 63.0] on 2026-05-16
-# after HPLC-PSC literature review. See Current Status Briefing.md
-# 2026-05-16 entry for full rationale.
 CARIACO_PHYTO_BIN_GEOMEANS = np.array([0.63, 6.3, 63.0])
+
+# Sieburth bin extents (Pico [0.2, 2], Nano [2, 20], Micro [20, 200] µm). Used
+# alongside CARIACO_PHYTO_BIN_GEOMEANS for the Platt-Denman / Brewin 2014b
+# normalised biomass size spectrum (NBSS) slope, which requires linear volume
+# widths Δv_i = (π/6)·(d_hi,i³ − d_lo,i³) of each bin. Override
+# `bin_extents` in compute_phyto_spectrum_metrics to test alternative
+# conventions.
+CARIACO_PHYTO_BIN_EXTENTS = np.array([
+    [0.2,  2.0],    # Pico
+    [2.0,  20.0],   # Nano
+    [20.0, 200.0],  # Micro
+])
 
 
 def compute_phyto_spectrum_metrics(model_vec, bin_definitions,
-                                   bin_geomeans=None):
+                                   bin_geomeans=None, bin_extents=None):
     """Compute Cariaco-side phyto size-spectrum metrics from a model target vector.
 
     Parallel to ``compute_cost_relative_spectrum`` but returns the metrics
-    themselves (centroid, Shannon evenness, 2-point Pico→Micro slope) rather
-    than a fit cost. The formulas match the Cariaco observation pipeline
-    (R-side ``depth_profile_data.r``, post-2026-05-12 Sathyendranath C:Chl
-    refactor) so the model output is directly comparable to the obs envelope
-    summarised in ``cariaco_monthly_euphotic_dynamic.csv``.
+    themselves (centroid, Shannon evenness, legacy 2-endpoint slope, proper
+    Platt-Denman NBSS slope) rather than a fit cost. The formulas match the
+    Cariaco observation pipeline (R-side ``depth_profile_data.r``,
+    post-2026-05-12 Sathyendranath C:Chl refactor, post-2026-05-16 Sieburth
+    revert + NBSS rename) so the model output is directly comparable to the
+    obs envelope summarised in ``cariaco_monthly_euphotic_dynamic.csv``.
 
     Restricts attention to bins with ``type='phyto'`` — the three Cariaco
     Pico / Nano / Micro bins as defined in ``TARGET_BIN_DEFINITIONS``. The
@@ -627,10 +634,21 @@ def compute_phyto_spectrum_metrics(model_vec, bin_definitions,
 
     Formulas (biomass-based, matching depth_profile_data.r):
 
-        centroid    = Σ_i p_i · log10(ESD_i)        — biomass-weighted log ESD
-        shannon     = -Σ_i p_i · ln(p_i)            — natural log; max ln(3)
-        nbss_slope  = (log10(B_micro) - log10(B_pico))
+        centroid    = Σ_i p_i · log10(ESD_i)         — biomass-weighted log ESD
+        shannon     = -Σ_i p_i · ln(p_i)             — natural log; max ln(3)
+        slope_2pt   = (log10(B_micro) - log10(B_pico))
                     / (log10(ESD_micro) - log10(ESD_pico))
+                       legacy 2-endpoint slope in diameter space; equals the
+                       per-class biomass exponent a under Sieburth equal-log-
+                       width bins. Renamed from `nbss_slope` on 2026-05-16.
+        nbss_slope  = slope of log10(B_i/Δv_i) regressed on log10(v_geom,i)
+                       across all phyto bins, where v = (π/6)·d³ and
+                       Δv = (π/6)·(d_hi³ − d_lo³). Platt-Denman 1977 / Brewin
+                       2014b convention; ≈ a/3 − 1 for a per-class spectrum
+                       P*(d) ∝ d^a (−1 for Sheldon-flat, −0.993 for Taniguchi
+                       Model 1 baseline a = +0.02). Convention-independent at
+                       the continuous limit. Global empirical range per
+                       Brewin 2014b Fig. 7: [−1.05, −0.75]. Added 2026-05-16.
 
     Parameters
     ----------
@@ -644,22 +662,32 @@ def compute_phyto_spectrum_metrics(model_vec, bin_definitions,
         Geometric-mean ESD (µm) for each phyto bin, in the same order as
         the phyto entries of ``bin_definitions``. Defaults to
         ``CARIACO_PHYTO_BIN_GEOMEANS`` (= [0.63, 6.3, 63.0], standard
-        Sieburth 1978 convention; reverted to this 2026-05-16 after a brief
-        2026-05-13 to 2026-05-15 exploration of [1.0, 6.3, 63.0]).
+        Sieburth 1978 convention).
+    bin_extents : array-like, shape (n_phyto, 2) or None, optional
+        Lower and upper ESD (µm) for each phyto bin, in the same order as
+        the phyto entries of ``bin_definitions``. Required for the
+        Platt-Denman NBSS slope (needs linear volume widths). Defaults to
+        ``CARIACO_PHYTO_BIN_EXTENTS`` (= [[0.2, 2], [2, 20], [20, 200]] µm
+        under standard Sieburth).
 
     Returns
     -------
     metrics : dict
-        Keys ``'centroid'``, ``'shannon'``, ``'nbss_slope'``, ``'fractions'``.
-        Scalar floats except ``'fractions'`` which is a 1-D np.ndarray in
-        phyto-bin order. All return NaN (and fractions all-NaN) if total
-        phyto biomass is non-positive or any phyto bin is non-finite. The
-        slope alone returns NaN if either slope endpoint (first or last
-        bin biomass) is non-positive.
+        Keys ``'centroid'``, ``'shannon'``, ``'slope_2pt'``, ``'nbss_slope'``,
+        ``'fractions'``. Scalar floats except ``'fractions'`` which is a 1-D
+        np.ndarray in phyto-bin order. All return NaN (and fractions all-NaN)
+        if total phyto biomass is non-positive or any phyto bin is
+        non-finite. ``slope_2pt`` returns NaN if either slope endpoint (first
+        or last bin biomass) is non-positive; ``nbss_slope`` returns NaN if
+        any bin biomass is non-positive (the 3-point regression needs all
+        three bins, unlike the 2-endpoint slope).
     """
     if bin_geomeans is None:
         bin_geomeans = CARIACO_PHYTO_BIN_GEOMEANS
+    if bin_extents is None:
+        bin_extents = CARIACO_PHYTO_BIN_EXTENTS
     bin_geomeans = np.asarray(bin_geomeans, dtype=float)
+    bin_extents = np.asarray(bin_extents, dtype=float)
 
     phyto_idx = [i for i, b in enumerate(bin_definitions)
                  if b['type'] == 'phyto']
@@ -668,6 +696,11 @@ def compute_phyto_spectrum_metrics(model_vec, bin_definitions,
             f"compute_phyto_spectrum_metrics: bin_definitions has "
             f"{len(phyto_idx)} phyto entries but bin_geomeans has "
             f"{len(bin_geomeans)}. Expected matching counts."
+        )
+    if bin_extents.shape != (len(bin_geomeans), 2):
+        raise ValueError(
+            f"compute_phyto_spectrum_metrics: bin_extents must have shape "
+            f"({len(bin_geomeans)}, 2); got {bin_extents.shape}."
         )
     if len(phyto_idx) < 2:
         raise ValueError(
@@ -680,6 +713,7 @@ def compute_phyto_spectrum_metrics(model_vec, bin_definitions,
     nan_result = dict(
         centroid=np.nan,
         shannon=np.nan,
+        slope_2pt=np.nan,
         nbss_slope=np.nan,
         fractions=np.full(len(phyto_idx), np.nan),
     )
@@ -701,32 +735,49 @@ def compute_phyto_spectrum_metrics(model_vec, bin_definitions,
         )
     shannon = float(-shannon_terms.sum())
 
+    # Legacy 2-endpoint slope (renamed from nbss_slope on 2026-05-16)
     B_pico = biomass[0]
     B_micro = biomass[-1]
     if B_pico > 0 and B_micro > 0:
-        nbss_slope = float(
+        slope_2pt = float(
             (np.log10(B_micro) - np.log10(B_pico))
             / (log_esd[-1] - log_esd[0])
         )
+    else:
+        slope_2pt = np.nan
+
+    # Platt-Denman 1977 / Brewin 2014b NBSS slope, computed via 3-point
+    # linear regression of log10(B/Δv) on log10(v_geom). Volume = (π/6)·d³;
+    # linear volume width Δv = (π/6)·(d_hi³ − d_lo³). All-or-nothing on
+    # bin positivity (a single zero bin makes the regression undefined).
+    if np.all(biomass > 0):
+        v_geom = (np.pi / 6.0) * bin_geomeans**3
+        dv = (np.pi / 6.0) * (bin_extents[:, 1]**3 - bin_extents[:, 0]**3)
+        log_density = np.log10(biomass / dv)
+        log_v_geom = np.log10(v_geom)
+        # polyfit returns coefficients in descending order; slope is [0]
+        slope, _intercept = np.polyfit(log_v_geom, log_density, 1)
+        nbss_slope = float(slope)
     else:
         nbss_slope = np.nan
 
     return dict(
         centroid=centroid,
         shannon=shannon,
+        slope_2pt=slope_2pt,
         nbss_slope=nbss_slope,
         fractions=fractions,
     )
 
 
 def compute_phyto_spectrum_metrics_grid(model_grid, bin_definitions,
-                                        bin_geomeans=None):
+                                        bin_geomeans=None, bin_extents=None):
     """Reduce a (n1, n2, n_targets) model_grid to per-cell phyto-metric grids.
 
     Parallel to ``compute_spectrum_cost_grid`` but returns the metrics
-    (centroid, Shannon, nbss_slope) rather than a fit cost. Iterates over
-    cells once and returns all three metrics — cheaper than calling
-    ``compute_phyto_spectrum_metrics`` three times if the caller wants
+    (centroid, Shannon, slope_2pt, nbss_slope) rather than a fit cost.
+    Iterates over cells once and returns all four metrics — cheaper than
+    calling ``compute_phyto_spectrum_metrics`` four times if the caller wants
     more than one metric.
 
     Operates on the post-processed ``model_grid`` from ``compute_cost_grid``
@@ -742,12 +793,14 @@ def compute_phyto_spectrum_metrics_grid(model_grid, bin_definitions,
     model_grid : np.ndarray, shape (n1, n2, n_targets)
     bin_definitions : list of dict
     bin_geomeans : array-like or None, optional
+    bin_extents : array-like, shape (n_phyto, 2) or None, optional
+        Forwarded to ``compute_phyto_spectrum_metrics`` for the NBSS slope.
 
     Returns
     -------
     grids : dict[str, np.ndarray]
-        Keys ``'centroid'``, ``'shannon'``, ``'nbss_slope'``. Each value is
-        a ``(n1, n2)`` ``np.ndarray``; NaN for failed cells.
+        Keys ``'centroid'``, ``'shannon'``, ``'slope_2pt'``, ``'nbss_slope'``.
+        Each value is a ``(n1, n2)`` ``np.ndarray``; NaN for failed cells.
     """
     model_grid = np.asarray(model_grid)
     if model_grid.ndim != 3:
@@ -759,12 +812,14 @@ def compute_phyto_spectrum_metrics_grid(model_grid, bin_definitions,
     grids = {
         'centroid':   np.full((n1, n2), np.nan),
         'shannon':    np.full((n1, n2), np.nan),
+        'slope_2pt':  np.full((n1, n2), np.nan),
         'nbss_slope': np.full((n1, n2), np.nan),
     }
     for i in range(n1):
         for j in range(n2):
             metrics = compute_phyto_spectrum_metrics(
-                model_grid[i, j, :], bin_definitions, bin_geomeans,
+                model_grid[i, j, :], bin_definitions,
+                bin_geomeans=bin_geomeans, bin_extents=bin_extents,
             )
             for k in grids:
                 grids[k][i, j] = metrics[k]
