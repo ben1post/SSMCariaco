@@ -519,9 +519,20 @@ integrate_hplc <- function(hplc_profiles, cutoffs, na_threshold = 10) {
       nano_frac_N  = ifelse(total_Cw > 0, nano_Cw  / total_Cw, NA_real_),
       pico_frac_N  = ifelse(total_Cw > 0, pico_Cw  / total_Cw, NA_real_),
 
-      # Size spectral metrics — biomass-based since Sathyendranath C:Chl refactor (2026-05-12);
-      # were pigment-based pre-refactor (size_centroid based on `micro`/`nano`/`pico`).
-      size_centroid = micro_frac_N * log10(63) + nano_frac_N * log10(6.3) + pico_frac_N * log10(0.63),
+      # Size spectral metrics — biomass-based, using bin geomeans for the
+      # *model-resolved* size range (0.5-2 / 2-20 / 20-200 µm). Geomeans are
+      # sqrt(0.5×2) = 1.0, sqrt(2×20) = 6.3, sqrt(20×200) = 63 µm. This is a
+      # deliberate departure from the canonical Sieburth (1978) Pico floor of
+      # 0.2 µm (which would give geomean 0.63 µm), chosen for 1-1 consistency
+      # with the model's resolved size range and the analytical derivation.
+      # Lorenzoni 2015 / Uitz 2006 pigment formulas (size *labels*) are
+      # unchanged; only the numerical geomeans are recomputed for the
+      # resolved Pico extent. See methods notes for justification.
+      # History:
+      #   - pre-2026-05-12: pigment-based metric on `micro`/`nano`/`pico` fractions
+      #   - 2026-05-12 to 2026-05-13: biomass-based with Sieburth geomeans (0.63/6.3/63)
+      #   - post-2026-05-13: biomass-based with resolved geomeans (1.0/6.3/63)
+      size_centroid = micro_frac_N * log10(63) + nano_frac_N * log10(6.3) + pico_frac_N * log10(1.0),
 
       size_shannon = -(ifelse(micro_frac_N > 0, micro_frac_N * log(micro_frac_N), 0) +
                        ifelse(nano_frac_N  > 0, nano_frac_N  * log(nano_frac_N),  0) +
@@ -529,9 +540,11 @@ integrate_hplc <- function(hplc_profiles, cutoffs, na_threshold = 10) {
 
       # nbss_slope uses the C-weighted shares (mathematically equivalent to using
       # micro_mmolN / pico_mmolN; the scalar K cancels in the log-ratio).
+      # Denominator log10(63) - log10(1.0) = log10(63) ≈ 1.7993, the log-decade
+      # span between the resolved-Pico and resolved-Micro geomeans.
       nbss_slope = ifelse(
         micro_Cw > 0 & pico_Cw > 0,
-        (log10(micro_Cw) - log10(pico_Cw)) / (log10(63) - log10(0.63)),
+        (log10(micro_Cw) - log10(pico_Cw)) / (log10(63) - log10(1.0)),
         NA_real_
       ),
 
@@ -936,18 +949,20 @@ get_full_scenario_data <- function(profile_data,
       nano_frac_N  = ifelse(total_Cw > 0, nano_Cw  / total_Cw, NA_real_),
       pico_frac_N  = ifelse(total_Cw > 0, pico_Cw  / total_Cw, NA_real_),
 
-      # Size spectral metrics — biomass-based since Sathyendranath C:Chl refactor (2026-05-12);
-      # were pigment-based pre-refactor (size_centroid based on `micro`/`nano`/`pico`).
-      size_centroid = micro_frac_N * log10(63) + nano_frac_N * log10(6.3) + pico_frac_N * log10(0.63),
+      # Size spectral metrics — biomass-based, using bin geomeans for the
+      # *model-resolved* size range (0.5-2 / 2-20 / 20-200 µm). See the same
+      # block in integrate_hplc() above for the full convention rationale.
+      # History: pigment (pre-2026-05-12) → biomass-with-Sieburth-geomeans
+      # (2026-05-12 to 2026-05-13) → biomass-with-resolved-geomeans (post-2026-05-13).
+      size_centroid = micro_frac_N * log10(63) + nano_frac_N * log10(6.3) + pico_frac_N * log10(1.0),
       size_shannon = -(ifelse(micro_frac_N > 0, micro_frac_N * log(micro_frac_N), 0) +
                        ifelse(nano_frac_N  > 0, nano_frac_N  * log(nano_frac_N),  0) +
                        ifelse(pico_frac_N  > 0, pico_frac_N  * log(pico_frac_N),  0)),
 
-      # nbss_slope uses the C-weighted shares (mathematically equivalent to using
-      # micro_mmolN / pico_mmolN; the scalar K cancels in the log-ratio).
+      # nbss_slope uses C-weighted shares; denominator = log10(63/1.0) ≈ 1.7993.
       nbss_slope = ifelse(
         micro_Cw > 0 & pico_Cw > 0,
-        (log10(micro_Cw) - log10(pico_Cw)) / (log10(63) - log10(0.63)),
+        (log10(micro_Cw) - log10(pico_Cw)) / (log10(63) - log10(1.0)),
         NA_real_
       ),
 
@@ -1305,9 +1320,9 @@ get_scenario_metadata <- function() {
     "micro_frac_N",       "dimensionless",     "Microphytoplankton biomass fraction",             "micro_mmolN / TotChlA_mmolN. Used by size_centroid and size_shannon.",
     "nano_frac_N",        "dimensionless",     "Nanophytoplankton biomass fraction",              "nano_mmolN / TotChlA_mmolN. Used by size_centroid and size_shannon.",
     "pico_frac_N",        "dimensionless",     "Picophytoplankton biomass fraction",              "pico_mmolN / TotChlA_mmolN. Used by size_centroid and size_shannon.",
-    "size_centroid",      "dimensionless",     "Biomass-weighted log10(ESD) centroid",            "Σ (biomass fraction × log10(bin geomean ESD)) over Pico/Nano/Micro. Biomass-based since 2026-05-12 refactor (was Chl-based).",
-    "size_shannon",       "dimensionless",     "Shannon evenness of 3-bin biomass",               "-Σ p·ln(p) on biomass fractions. Max = ln(3) ≈ 1.099. Biomass-based since 2026-05-12 refactor.",
-    "nbss_slope",         "dimensionless",     "2-point biomass spectrum slope (Pico ↔ Micro)",  "(log10(micro_mmolN) - log10(pico_mmolN)) / (log10(63) - log10(0.63)). Biomass-based since 2026-05-12 refactor.",
+    "size_centroid",      "dimensionless",     "Biomass-weighted log10(ESD) centroid",            "Σ (biomass fraction × log10(bin geomean ESD)) over Pico/Nano/Micro. Bin geomeans: Pico = 1.0 µm (= sqrt(0.5×2), model-resolved), Nano = 6.3 µm, Micro = 63 µm. Biomass-based since 2026-05-12; resolved-Pico-geomean since 2026-05-13 (was 0.63 µm Sieburth before).",
+    "size_shannon",       "dimensionless",     "Shannon evenness of 3-bin biomass",               "-Σ p·ln(p) on biomass fractions. Max = ln(3) ≈ 1.099. Geomean-convention-independent (only fractions enter). Biomass-based since 2026-05-12.",
+    "nbss_slope",         "dimensionless",     "2-point biomass spectrum slope (Pico ↔ Micro)",  "(log10(micro_mmolN) - log10(pico_mmolN)) / (log10(63) - log10(1.0)) = numerator/1.7993. Resolved-geomean denominator since 2026-05-13 (was /2.0 with Sieburth Pico geomean 0.63 before).",
 
     "PP_mmolN_m3_d",    "mmol N m⁻³ d⁻¹",  "Primary productivity, volumetric N",              "Niskin PP [mgC m⁻³ h⁻¹] × 12 / 12.01 × (16/106). Native volumetric — no depth division needed. For direct comparison with model phyto uptake flux.",
     "Chl_niskin_mgm3",  "mg m⁻³",          "Niskin fluorometric chlorophyll (depth-mean)",    "Interpolated Niskin Chlorophyll, mean over 0-depth_cutoff. Raw units.",
@@ -1536,6 +1551,9 @@ summarize_full_scenario_detailed <- function(full_data, include_unclassified = T
   cat(sprintf("      Pico = %.0f, Nano = %.0f, Micro = %.0f (mg C / mg Chl)\n",
               C_TO_CHL_PICO, C_TO_CHL_NANO, C_TO_CHL_MICRO))
   cat("  • Unit conversion: mg Chl × (per-class C:Chl) / 12.01 × (N:C=16/106) → mmol N\n")
+  cat("  • Size-spectrum bin geomeans (model-resolved size range 0.5-200 µm):\n")
+  cat("      Pico geomean = 1.0 µm (= sqrt(0.5 × 2)), Nano = 6.3 µm, Micro = 63 µm\n")
+  cat("      Centroid and slope use these geomeans, not the canonical Sieburth (0.63/6.3/63)\n")
   cat("  • Niskin Chl (Chl_niskin_mmolN) still uses bulk C:Chl=50 (not size-resolved)\n")
   cat("  • Zooplankton: mg DW × (C:DW=0.4) / 12.01 × (N:C=16/106) → mmol N\n")
   cat("  • PP: Niskin integrated, ×12 for 12h tropical daylight\n")
@@ -1550,47 +1568,59 @@ summarize_full_scenario_detailed <- function(full_data, include_unclassified = T
 
 
 # =============================================================================
-# 8. SANITY CHECK — pre- vs post-Sathyendranath refactor envelope comparison
+# 8. SANITY CHECK — bin-geomean convention shift (2026-05-13)
 # =============================================================================
 
-#' Compare pre-refactor (pigment-based) vs post-refactor (biomass-based) envelope
+#' Compare pre- vs post-geomean-shift envelope (Sieburth 0.63 vs resolved 1.0)
 #'
-#' Sanity check for the 2026-05-12 Sathyendranath C:Chl refactor. Reconstructs
-#' the old pigment-based metrics from the preserved pigment fractions and prints
-#' the per-metric summary (n, mean, median, IQR, range) and the three-era
-#' centroid contrast (pre-collapse < 2005-01-01 / post-collapse 2005–2013 /
-#' recovery ≥ 2014). Useful to verify the refactor's effect direction and
-#' magnitude before committing.
+#' Sanity check for the 2026-05-13 bin-geomean refactor. Compares the previous
+#' Sieburth-style Pico geomean (0.63 µm, from canonical 0.2-2 µm bin) against
+#' the new model-resolved Pico geomean (1.0 µm, from 0.5-2 µm bin matching the
+#' model grid extent). Both versions are biomass-based (post-Sathyendranath
+#' 2026-05-12); the only thing that changes is the Pico bin geomean weight
+#' and the slope denominator.
 #'
-#' Note: the pre-refactor metrics are reconstructed from monthly pigment-fraction
-#' means, not per-day-then-averaged. For centroid and Shannon this is exact (the
-#' formulas are linear or near-linear in the fractions); for nbss_slope it is an
-#' approximation that ignores within-month covariance between micro_frac and
-#' Tot_Chl_a. Adequate for the sanity check; if a manuscript-grade comparison is
-#' needed, recompute on the per-date hplc_integrated frame.
+#' Reconstructs the pre-shift values analytically from the preserved biomass
+#' fractions (centroid and slope shift by exact closed-form amounts; Shannon
+#' is invariant — only depends on fractions).
+#'
+#' Output is plain text suitable for copying into a memory / discussion log.
 #'
 #' @param monthly_df Monthly data frame from get_full_scenario_data — must
-#'   contain `time_month`, `micro_frac`, `nano_frac`, `pico_frac`, `size_centroid`,
-#'   `size_shannon`, `nbss_slope`.
-#' @return Invisibly, the monthly_df with old_* reconstructed columns appended.
+#'   contain `time_month`, `micro_frac_N`, `nano_frac_N`, `pico_frac_N`,
+#'   `size_centroid`, `size_shannon`, `nbss_slope`.
+#' @return Invisibly, monthly_df with pre-shift reconstructed columns appended.
 compare_envelope_old_vs_new <- function(monthly_df) {
 
-  LOG_RATIO  <- log10(63) - log10(0.63)   # = 2.0
-  LOG_MICRO  <- log10(63)
+  # Old (Sieburth) geomeans
+  GEOMEAN_PICO_OLD  <- 0.63
+  LOG_PICO_OLD      <- log10(GEOMEAN_PICO_OLD)        # -0.2007
+  LOG_RATIO_OLD     <- log10(63) - LOG_PICO_OLD       # 2.000
+
+  # New (model-resolved) geomeans
+  GEOMEAN_PICO_NEW  <- 1.0
+  LOG_PICO_NEW      <- log10(GEOMEAN_PICO_NEW)        #  0.0000
+  LOG_RATIO_NEW     <- log10(63) - LOG_PICO_NEW       # 1.7993
+
+  # Shared Nano / Micro (unchanged)
   LOG_NANO   <- log10(6.3)
-  LOG_PICO   <- log10(0.63)
-  SLOPE_OFFSET_CHL_MINUS_NEW <-
-    log10(C_TO_CHL_PICO / C_TO_CHL_MICRO) / LOG_RATIO
+  LOG_MICRO  <- log10(63)
 
   comp <- monthly_df %>%
     mutate(
-      # Pre-refactor metrics reconstructed from preserved pigment fractions
-      size_centroid_chl = micro_frac * LOG_MICRO + nano_frac * LOG_NANO + pico_frac * LOG_PICO,
-      size_shannon_chl  = -(ifelse(micro_frac > 0, micro_frac * log(micro_frac), 0) +
-                            ifelse(nano_frac  > 0, nano_frac  * log(nano_frac),  0) +
-                            ifelse(pico_frac  > 0, pico_frac  * log(pico_frac),  0)),
-      # Old Chl-based slope = new biomass-based slope + log10(C:Chl_Pico / C:Chl_Micro) / LOG_RATIO
-      nbss_slope_chl = nbss_slope + SLOPE_OFFSET_CHL_MINUS_NEW
+      # Reconstruct pre-refactor (Sieburth-geomean) metrics from biomass
+      # fractions. Centroid is recomputed directly using LOG_PICO_OLD.
+      size_centroid_pre = micro_frac_N * LOG_MICRO +
+                          nano_frac_N  * LOG_NANO  +
+                          pico_frac_N  * LOG_PICO_OLD,
+
+      # Shannon is invariant to the geomean choice (only depends on the
+      # biomass fractions), so pre == new. Repeat the column for clarity.
+      size_shannon_pre  = size_shannon,
+
+      # Slope scales by the ratio of denominators since the numerator
+      # (log10(B_micro) - log10(B_pico)) is unchanged.
+      nbss_slope_pre    = nbss_slope * LOG_RATIO_NEW / LOG_RATIO_OLD
     )
 
   # 7-number summary helper
@@ -1608,26 +1638,32 @@ compare_envelope_old_vs_new <- function(monthly_df) {
          max    = max(v))
   }
 
-  cat("\n=== Size-spectrum envelope: pigment-based (pre-refactor) vs biomass-based (post) ===\n")
-  cat(sprintf("C:Chl used (Sathyendranath 2009 HPLC): Pico=%g  Nano=%g  Micro=%g\n\n",
-              C_TO_CHL_PICO, C_TO_CHL_NANO, C_TO_CHL_MICRO))
+  cat("\n=== Size-spectrum envelope: pre-shift (Sieburth Pico geomean 0.63)",
+      "vs post-shift (resolved 1.0) ===\n")
+  cat(sprintf("Pico bin geomean: pre = %.2f µm (Sieburth 0.2-2 µm bin);  ",
+              GEOMEAN_PICO_OLD))
+  cat(sprintf("post = %.2f µm (model-resolved 0.5-2 µm)\n",
+              GEOMEAN_PICO_NEW))
+  cat(sprintf("Slope denominator: pre = %.4f (log10(63/0.63));  ",
+              LOG_RATIO_OLD))
+  cat(sprintf("post = %.4f (log10(63/1.0))\n\n", LOG_RATIO_NEW))
 
   metric_pairs <- list(
-    c(old = "size_centroid_chl", new = "size_centroid"),
-    c(old = "size_shannon_chl",  new = "size_shannon"),
-    c(old = "nbss_slope_chl",    new = "nbss_slope")
+    c(pre = "size_centroid_pre", post = "size_centroid"),
+    c(pre = "size_shannon_pre",  post = "size_shannon"),
+    c(pre = "nbss_slope_pre",    post = "nbss_slope")
   )
 
   for (mp in metric_pairs) {
-    old <- summarise_metric(comp[[mp["old"]]])
-    new <- summarise_metric(comp[[mp["new"]]])
-    cat(sprintf("--- %s ---\n", mp["new"]))
-    cat(sprintf("  old (Chl-based): n=%3d  mean=%+6.3f  median=%+6.3f  IQR=[%+6.3f, %+6.3f]  range=[%+6.3f, %+6.3f]\n",
-                old$n, old$mean, old$median, old$q25, old$q75, old$min, old$max))
-    cat(sprintf("  new (biomass):   n=%3d  mean=%+6.3f  median=%+6.3f  IQR=[%+6.3f, %+6.3f]  range=[%+6.3f, %+6.3f]\n",
-                new$n, new$mean, new$median, new$q25, new$q75, new$min, new$max))
-    cat(sprintf("  Δ (new − old):                  Δmean=%+6.3f  Δmedian=%+6.3f\n\n",
-                new$mean - old$mean, new$median - old$median))
+    o <- summarise_metric(comp[[mp["pre"]]])
+    n <- summarise_metric(comp[[mp["post"]]])
+    cat(sprintf("--- %s ---\n", mp["post"]))
+    cat(sprintf("  pre-shift  (geomean 0.63): n=%3d  mean=%+6.3f  median=%+6.3f  IQR=[%+6.3f, %+6.3f]  range=[%+6.3f, %+6.3f]\n",
+                o$n, o$mean, o$median, o$q25, o$q75, o$min, o$max))
+    cat(sprintf("  post-shift (geomean 1.00): n=%3d  mean=%+6.3f  median=%+6.3f  IQR=[%+6.3f, %+6.3f]  range=[%+6.3f, %+6.3f]\n",
+                n$n, n$mean, n$median, n$q25, n$q75, n$min, n$max))
+    cat(sprintf("  Δ (post − pre):                          Δmean=%+6.3f  Δmedian=%+6.3f\n\n",
+                n$mean - o$mean, n$median - o$median))
   }
 
   # Three-era centroid contrast
@@ -1654,20 +1690,53 @@ compare_envelope_old_vs_new <- function(monthly_df) {
 
   cat("=== Three-era centroid contrast (pre <2005-01-01 / post 2005-2013 / recovery ≥2014) ===\n")
   for (e in c("pre", "post", "recovery")) {
-    o <- summarise_metric(comp$size_centroid_chl[comp$.era == e & !is.na(comp$.era)])
-    n <- summarise_metric(comp$size_centroid[comp$.era == e & !is.na(comp$.era)])
-    cat(sprintf("  %-9s — old: median=%+6.3f mean=%+6.3f n=%2d  |  new: median=%+6.3f mean=%+6.3f n=%2d\n",
-                e, o$median, o$mean, o$n, n$median, n$mean, n$n))
+    o <- summarise_metric(comp$size_centroid_pre[comp$.era == e & !is.na(comp$.era)])
+    n <- summarise_metric(comp$size_centroid[comp$.era == e     & !is.na(comp$.era)])
+    cat(sprintf("  %-9s — pre-shift: median=%+6.3f mean=%+6.3f n=%2d  |  post-shift: median=%+6.3f mean=%+6.3f n=%2d  |  IQR_post=[%+6.3f, %+6.3f]  range_post=[%+6.3f, %+6.3f]\n",
+                e, o$median, o$mean, o$n,
+                n$median, n$mean, n$n,
+                n$q25, n$q75, n$min, n$max))
   }
 
-  pre_old  <- median(comp$size_centroid_chl[comp$.era == "pre"  & !is.na(comp$.era)], na.rm = TRUE)
-  post_old <- median(comp$size_centroid_chl[comp$.era == "post" & !is.na(comp$.era)], na.rm = TRUE)
-  pre_new  <- median(comp$size_centroid[comp$.era == "pre"  & !is.na(comp$.era)],     na.rm = TRUE)
-  post_new <- median(comp$size_centroid[comp$.era == "post" & !is.na(comp$.era)],     na.rm = TRUE)
+  pre_centroid_pre   <- median(comp$size_centroid_pre[comp$.era == "pre"  & !is.na(comp$.era)], na.rm = TRUE)
+  post_centroid_pre  <- median(comp$size_centroid_pre[comp$.era == "post" & !is.na(comp$.era)], na.rm = TRUE)
+  pre_centroid_post  <- median(comp$size_centroid[comp$.era == "pre"  & !is.na(comp$.era)],     na.rm = TRUE)
+  post_centroid_post <- median(comp$size_centroid[comp$.era == "post" & !is.na(comp$.era)],     na.rm = TRUE)
 
-  cat(sprintf("\n  Pre−Post centroid contrast: old=%.3f  →  new=%.3f  (Δ=%+.3f)\n",
-              pre_old - post_old, pre_new - post_new,
-              (pre_new - post_new) - (pre_old - post_old)))
+  cat(sprintf("\n  Pre−Post era contrast (centroid): pre-shift=%.3f  →  post-shift=%.3f  (Δ=%+.3f)\n",
+              pre_centroid_pre - post_centroid_pre,
+              pre_centroid_post - post_centroid_post,
+              (pre_centroid_post - post_centroid_post) -
+                (pre_centroid_pre - post_centroid_pre)))
+
+  # Pre-collapse bloom target (Q75-max under post-shift convention) —
+  # the explicit target for the math derivation lever budget.
+  pre_era_post_shift <- comp$size_centroid[comp$.era == "pre" & !is.na(comp$.era)]
+  pre_era_post_shift <- pre_era_post_shift[!is.na(pre_era_post_shift)]
+  if (length(pre_era_post_shift) > 0) {
+    bloom_q75 <- quantile(pre_era_post_shift, 0.75, names = FALSE)
+    bloom_max <- max(pre_era_post_shift)
+    cat(sprintf("\n  Pre-collapse bloom target (post-shift, the math-derivation target):\n"))
+    cat(sprintf("    Q75 = %+.3f   max = %+.3f   range [Q75, max] = [%+.3f, %+.3f]\n",
+                bloom_q75, bloom_max, bloom_q75, bloom_max))
+  }
+
+  cat("\n=== Memory-paste summary (post-shift values, ready for project_obs_envelope.md) ===\n")
+  cat("Use these to update the obs envelope memory and MS3 Project Background:\n\n")
+  for (mp in metric_pairs) {
+    s <- summarise_metric(comp[[mp["post"]]])
+    cat(sprintf("  %s (post-shift): n=%d, mean=%+.3f, median=%+.3f, IQR=[%+.3f, %+.3f], range=[%+.3f, %+.3f]\n",
+                mp["post"], s$n, s$mean, s$median, s$q25, s$q75, s$min, s$max))
+  }
+  for (e in c("pre", "post", "recovery")) {
+    s <- summarise_metric(comp$size_centroid[comp$.era == e & !is.na(comp$.era)])
+    cat(sprintf("  era %-9s centroid: n=%d, mean=%+.3f, median=%+.3f, IQR=[%+.3f, %+.3f], range=[%+.3f, %+.3f]\n",
+                e, s$n, s$mean, s$median, s$q25, s$q75, s$min, s$max))
+  }
+  cat(sprintf("  pre-collapse bloom target (Q75–max): [%+.3f, %+.3f]\n",
+              bloom_q75, bloom_max))
+  cat(sprintf("  pre−post era contrast (centroid medians): %.3f units\n",
+              pre_centroid_post - post_centroid_post))
 
   invisible(comp %>% select(-.date_for_era, -.era))
 }

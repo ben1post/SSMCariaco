@@ -589,10 +589,17 @@ def compute_spectrum_cost_grid(model_grid, obs_vec, bin_definitions,
 # =============================================================================
 # PHYTO SIZE-SPECTRUM METRICS
 # =============================================================================
-# Cariaco operational bin geomeans (sqrt of operational bin extents
-# 0.2-2 / 2-20 / 20-200 µm). Matches depth_profile_data.r `size_centroid`
-# computation. Override `bin_geomeans` to test alternative conventions.
-CARIACO_PHYTO_BIN_GEOMEANS = np.array([0.63, 6.3, 63.0])
+# Cariaco bin geomeans matching the model-resolved size range (0.5-2 / 2-20 /
+# 20-200 µm). The Pico geomean = sqrt(0.5×2) = 1.0 µm deliberately departs
+# from canonical Sieburth (0.2-2 µm → geomean 0.63) because: (a) Cariaco Pico
+# is dominated by Synechococcus + picoeukaryotes (≥ 0.5 µm) per Lorenzoni
+# 2015 §3.1 with Prochlorococcus rare in coastal upwelling; (b) the MS3
+# model resolves 0.5-200 µm; (c) 1-1 consistency between model, obs metric,
+# and analytical derivation integration limits. Updated 2026-05-13;
+# previous value was [0.63, 6.3, 63.0]. Mirrors `depth_profile_data.r`
+# `size_centroid` geomean weights. Override `bin_geomeans` to test
+# alternative conventions.
+CARIACO_PHYTO_BIN_GEOMEANS = np.array([1.0, 6.3, 63.0])
 
 
 def compute_phyto_spectrum_metrics(model_vec, bin_definitions,
@@ -629,7 +636,8 @@ def compute_phyto_spectrum_metrics(model_vec, bin_definitions,
     bin_geomeans : array-like, shape (n_phyto,) or None, optional
         Geometric-mean ESD (µm) for each phyto bin, in the same order as
         the phyto entries of ``bin_definitions``. Defaults to
-        ``CARIACO_PHYTO_BIN_GEOMEANS`` (= [0.63, 6.3, 63.0]).
+        ``CARIACO_PHYTO_BIN_GEOMEANS`` (= [1.0, 6.3, 63.0], model-resolved;
+        updated 2026-05-13 from the previous Sieburth [0.63, 6.3, 63.0]).
 
     Returns
     -------
