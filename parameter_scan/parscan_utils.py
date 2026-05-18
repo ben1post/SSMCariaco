@@ -589,17 +589,24 @@ def compute_spectrum_cost_grid(model_grid, obs_vec, bin_definitions,
 # =============================================================================
 # PHYTO SIZE-SPECTRUM METRICS
 # =============================================================================
-# Cariaco bin geomeans matching the model-resolved size range (0.5-2 / 2-20 /
-# 20-200 µm). The Pico geomean = sqrt(0.5×2) = 1.0 µm deliberately departs
-# from canonical Sieburth (0.2-2 µm → geomean 0.63) because: (a) Cariaco Pico
-# is dominated by Synechococcus + picoeukaryotes (≥ 0.5 µm) per Lorenzoni
-# 2015 §3.1 with Prochlorococcus rare in coastal upwelling; (b) the MS3
-# model resolves 0.5-200 µm; (c) 1-1 consistency between model, obs metric,
-# and analytical derivation integration limits. Updated 2026-05-13;
-# previous value was [0.63, 6.3, 63.0]. Mirrors `depth_profile_data.r`
-# `size_centroid` geomean weights. Override `bin_geomeans` to test
-# alternative conventions.
-CARIACO_PHYTO_BIN_GEOMEANS = np.array([1.0, 6.3, 63.0])
+# Cariaco bin geomeans under the standard Sieburth (1978) convention:
+# Pico [0.2, 2] µm → geomean sqrt(0.2×2) = 0.63 µm; Nano [2, 20] → 6.3; Micro
+# [20, 200] → 63. All three bins have equal log-width of 1 dex, giving the
+# clean slope theorem slope_2pt = a (per-class spectrum exponent) and a single
+# neutral centroid value of +0.80 (spectrum-theory neutral coincides with
+# equal-fractions reference under Sieburth's equal log-widths). This is the
+# universal convention in the HPLC-PSC literature applicable to MS3 (Chase
+# 2020, Brewin 2014a,b, Wollschläger 2015, Acevedo-Trejos 2015) and in the
+# CARIACO programme reviews (Mueller-Karger 2019). Mirrors
+# `depth_profile_data.r` `size_centroid` geomean weights. Override
+# `bin_geomeans` to test alternative conventions.
+#
+# History: was [0.63, 6.3, 63.0] (Sieburth) before 2026-05-13; briefly set to
+# [1.0, 6.3, 63.0] from 2026-05-13 to 2026-05-15 during a Cariaco-specific
+# 0.5 µm Pico floor exploration; reverted to [0.63, 6.3, 63.0] on 2026-05-16
+# after HPLC-PSC literature review. See Current Status Briefing.md
+# 2026-05-16 entry for full rationale.
+CARIACO_PHYTO_BIN_GEOMEANS = np.array([0.63, 6.3, 63.0])
 
 
 def compute_phyto_spectrum_metrics(model_vec, bin_definitions,
@@ -636,8 +643,9 @@ def compute_phyto_spectrum_metrics(model_vec, bin_definitions,
     bin_geomeans : array-like, shape (n_phyto,) or None, optional
         Geometric-mean ESD (µm) for each phyto bin, in the same order as
         the phyto entries of ``bin_definitions``. Defaults to
-        ``CARIACO_PHYTO_BIN_GEOMEANS`` (= [1.0, 6.3, 63.0], model-resolved;
-        updated 2026-05-13 from the previous Sieburth [0.63, 6.3, 63.0]).
+        ``CARIACO_PHYTO_BIN_GEOMEANS`` (= [0.63, 6.3, 63.0], standard
+        Sieburth 1978 convention; reverted to this 2026-05-16 after a brief
+        2026-05-13 to 2026-05-15 exploration of [1.0, 6.3, 63.0]).
 
     Returns
     -------
