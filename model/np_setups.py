@@ -66,12 +66,31 @@ N_CLASSES = 40
 ESD_MIN   = 0.2
 ESD_MAX   = 200.0
 
-# IVP run duration. Reduced 2026-05-18 from 5000 d to 2000 d: the N-P
-# competitive-exclusion dynamics are well-resolved by ~1500 d (losing
-# classes 2-3 e-folds below their initial value), and integrating the
-# asymptotic-zero regime past that is slow (stiff near-zero behaviour).
-IVP_TIME_END   = 2000
+# IVP run duration. Restored 2026-05-18 from 2000 d to 5000 d after the
+# LSODA + relaxed-atol switch (see IVP_SOLVER_KWARGS below) made each
+# cell sub-second; 2000 d was a workaround for RK45 stiffness slowness
+# that is no longer relevant. At 5000 d the slowest-decaying loser
+# classes have 5+ e-folds below their initial value, so the tail-mean
+# represents a more fully resolved steady state.
+IVP_TIME_END   = 5000
 ivp_time_array = np.arange(0, IVP_TIME_END, 1)
+
+# scipy.integrate.solve_ivp method + tolerances (passed via XSO's
+# solver_kwargs hook added 2026-05-18).
+#
+# LSODA auto-switches between Adams (non-stiff) and BDF (stiff) and
+# is the safe default for size-spectrum systems with mixed regimes.
+#
+# Tolerances loosened from XSO's RK45 defaults (atol=1e-9, rtol=1e-6).
+# In competitive-exclusion N-P dynamics, ~40 loser classes spend long
+# stretches at <1e-6 mmol N m-3 — biologically noise — and tight atol
+# forces the step controller to spend most of its budget tracking
+# those values faithfully. The relaxed values match the physically
+# meaningful precision: any concentration below ~1e-6 is rounding,
+# and 1e-4 relative is finer than every comparison we make in the
+# manuscript metrics. Final-state comparison after this change should
+# still match RK45/default-tol within fractions of a percent.
+IVP_SOLVER_KWARGS = {'method': 'LSODA', 'atol': 1e-6, 'rtol': 1e-4}
 
 
 def generate_size_classes(n=None, esd_min=None, esd_max=None):
@@ -93,12 +112,20 @@ mu_max_arr = 1.36 * phyto_esd ** (-0.16)
 k_s_arr    = 0.33 * phyto_esd ** ( 0.48)
 
 # Two Λ variants:
-#   const — size-independent, Taniguchi value 0.0015 d⁻¹
+#   const — size-independent
 #   allom — Λ(s) = Λ₀ · s^(-0.25), the MTE prediction Taniguchi explicitly
-#           rejected; included here so we can show that even with this
-#           classic size-dependence the system still collapses to a single
-#           surviving class. Anchored so Λ(1 µm) = the const value.
-LAMBDA_CONST     = 0.0015
+#           rejected; included here to show that even with this classic
+#           size-dependence the system still collapses to a single surviving
+#           class. Anchored so Λ(1 µm) = the const value.
+#
+# 2026-05-18: prefactor raised from Taniguchi's 0.0015 d⁻¹ to a more
+# conventional 0.1 d⁻¹ (Stock 2008 background phyto mortality; Banas
+# 2011 m_P ≈ 0.1·μ). The Taniguchi value produces decay timescales of
+# ~20 000 d for classes near the competitive-exclusion winner, far past
+# our 2000 d IVP window; with 0.1 d⁻¹ adjacent-class decay timescales
+# are ~330 d so loser classes are 99 %+ decayed by t = 2000. Qualitative
+# competitive-exclusion result is unchanged; visualisation becomes clean.
+LAMBDA_CONST     = 0.1
 LAMBDA_ALLOM_EXP = -0.25
 lambda_arr_const = np.full(n_classes, LAMBDA_CONST)
 lambda_arr_allom = LAMBDA_CONST * phyto_esd ** LAMBDA_ALLOM_EXP
@@ -122,7 +149,7 @@ N_INIT_OPEN      = 1.0                  # open: irrelevant to SS, just a seed
 
 
 # =============================================================================
-# MODEL ASSEMBLY — CLOSED VARIANT
+# MODELS
 # =============================================================================
 model_closed = xso.create({
     'Nutrient':      Nutrient,
@@ -131,68 +158,6 @@ model_closed = xso.create({
     'PhytoLoss':     PhytoLinearLoss_recycled,
 })
 
-# Shared structural input_vars (the dict that doesn't change between
-# const and allom variants of the closed model)
-_closed_base = {
-    'Nutrient': {
-        'value_label': 'N',
-        'value_init':  N_INIT_CLOSED,
-    },
-    'Phytoplankton': {
-        'biomass_label':   'P',
-        'biomass_init':    phyto_init,
-        'phyto_esd_index': phyto_esd.tolist(),
-        'phyto_esd_label': 'phyto_esd',
-    },
-    'Growth': {
-        'resource': 'N',
-        'consumer': 'P',
-        'mu_max':   mu_max_arr,
-        'halfsat':  k_s_arr,
-    },
-    # 'PhytoLoss' filled in per variant below
-}
-
-
-def _closed_inputs(loss_rate):
-    return {
-        **_closed_base,
-        'PhytoLoss': {
-            'population': 'P',
-            'nutrient':   'N',
-            'rate':       loss_rate,
-        },
-    }
-
-
-# IVP + stability setups, closed-const
-model_setup_closed_const = xso.setup(
-    solver='solve_ivp', model=model_closed,
-    time=ivp_time_array,
-    input_vars=_closed_inputs(lambda_arr_const),
-)
-model_setup_closed_const_stability = xso.setup(
-    solver='stability', model=model_closed,
-    time=[0, 1],
-    input_vars=_closed_inputs(lambda_arr_const),
-)
-
-# IVP + stability setups, closed-allom
-model_setup_closed_allom = xso.setup(
-    solver='solve_ivp', model=model_closed,
-    time=ivp_time_array,
-    input_vars=_closed_inputs(lambda_arr_allom),
-)
-model_setup_closed_allom_stability = xso.setup(
-    solver='stability', model=model_closed,
-    time=[0, 1],
-    input_vars=_closed_inputs(lambda_arr_allom),
-)
-
-
-# =============================================================================
-# MODEL ASSEMBLY — OPEN VARIANT (CHEMOSTAT)
-# =============================================================================
 model_open = xso.create({
     'Nutrient':      Nutrient,
     'Phytoplankton': PhytoSizeSpectrum,
@@ -204,75 +169,162 @@ model_open = xso.create({
     'DilutionP':     ChemostatDilution_PhytoDim,
 })
 
-_open_base = {
-    'Nutrient': {
-        'value_label': 'N',
-        'value_init':  N_INIT_OPEN,
+
+# =============================================================================
+# SETUP — CLOSED, SIZE-INDEPENDENT Λ
+# =============================================================================
+model_setup_closed_const = xso.setup(
+    solver='solve_ivp', model=model_closed,
+    time=ivp_time_array,
+    input_vars={
+        'Nutrient':      {'value_label': 'N', 'value_init': N_INIT_CLOSED},
+        'Phytoplankton': {'biomass_label': 'P', 'biomass_init': phyto_init,
+                          'phyto_esd_index': phyto_esd.tolist(),
+                          'phyto_esd_label': 'phyto_esd'},
+        'Growth':        {'resource': 'N', 'consumer': 'P',
+                          'mu_max': mu_max_arr, 'halfsat': k_s_arr},
+        'PhytoLoss':     {'population': 'P', 'nutrient': 'N',
+                          'rate': lambda_arr_const},
     },
-    'Phytoplankton': {
-        'biomass_label':   'P',
-        'biomass_init':    phyto_init,
-        'phyto_esd_index': phyto_esd.tolist(),
-        'phyto_esd_label': 'phyto_esd',
+    solver_kwargs=IVP_SOLVER_KWARGS,
+)
+
+model_setup_closed_const_stability = xso.setup(
+    solver='stability', model=model_closed,
+    time=[0, 1],
+    input_vars={
+        'Nutrient':      {'value_label': 'N', 'value_init': N_INIT_CLOSED},
+        'Phytoplankton': {'biomass_label': 'P', 'biomass_init': phyto_init,
+                          'phyto_esd_index': phyto_esd.tolist(),
+                          'phyto_esd_label': 'phyto_esd'},
+        'Growth':        {'resource': 'N', 'consumer': 'P',
+                          'mu_max': mu_max_arr, 'halfsat': k_s_arr},
+        'PhytoLoss':     {'population': 'P', 'nutrient': 'N',
+                          'rate': lambda_arr_const},
     },
-    'Growth': {
-        'resource': 'N',
-        'consumer': 'P',
-        'mu_max':   mu_max_arr,
-        'halfsat':  k_s_arr,
-    },
-    # 'PhytoLoss' per variant
-    'FN_Forcing': {
-        'forcing_label': 'FN_supply',
-        'value':         F_N_DEFAULT,
-    },
-    'FN_Input': {
-        'var':     'N',
-        'forcing': 'FN_supply',
-        'rate':    1.0 / D_E,    # gives flux = F_N / d_e
-    },
-    'DilutionN': {
-        'var':  'N',
-        'rate': DILUTION_RATE,
-    },
-    'DilutionP': {
-        'var':  'P',
-        'rate': DILUTION_RATE,
-    },
-}
+)
 
 
-def _open_inputs(loss_rate):
-    return {
-        **_open_base,
-        'PhytoLoss': {
-            'population': 'P',
-            'nutrient':   'N',
-            'rate':       loss_rate,
-        },
-    }
+# =============================================================================
+# SETUP — CLOSED, SIZE-DEPENDENT Λ(s) = Λ₀ · s^(-0.25)
+# =============================================================================
+model_setup_closed_allom = xso.setup(
+    solver='solve_ivp', model=model_closed,
+    time=ivp_time_array,
+    input_vars={
+        'Nutrient':      {'value_label': 'N', 'value_init': N_INIT_CLOSED},
+        'Phytoplankton': {'biomass_label': 'P', 'biomass_init': phyto_init,
+                          'phyto_esd_index': phyto_esd.tolist(),
+                          'phyto_esd_label': 'phyto_esd'},
+        'Growth':        {'resource': 'N', 'consumer': 'P',
+                          'mu_max': mu_max_arr, 'halfsat': k_s_arr},
+        'PhytoLoss':     {'population': 'P', 'nutrient': 'N',
+                          'rate': lambda_arr_allom},
+    },
+    solver_kwargs=IVP_SOLVER_KWARGS,
+)
+
+model_setup_closed_allom_stability = xso.setup(
+    solver='stability', model=model_closed,
+    time=[0, 1],
+    input_vars={
+        'Nutrient':      {'value_label': 'N', 'value_init': N_INIT_CLOSED},
+        'Phytoplankton': {'biomass_label': 'P', 'biomass_init': phyto_init,
+                          'phyto_esd_index': phyto_esd.tolist(),
+                          'phyto_esd_label': 'phyto_esd'},
+        'Growth':        {'resource': 'N', 'consumer': 'P',
+                          'mu_max': mu_max_arr, 'halfsat': k_s_arr},
+        'PhytoLoss':     {'population': 'P', 'nutrient': 'N',
+                          'rate': lambda_arr_allom},
+    },
+)
 
 
-# IVP + stability setups, open-const
+# =============================================================================
+# SETUP — OPEN CHEMOSTAT, SIZE-INDEPENDENT Λ
+# =============================================================================
 model_setup_open_const = xso.setup(
     solver='solve_ivp', model=model_open,
     time=ivp_time_array,
-    input_vars=_open_inputs(lambda_arr_const),
+    input_vars={
+        'Nutrient':      {'value_label': 'N', 'value_init': N_INIT_OPEN},
+        'Phytoplankton': {'biomass_label': 'P', 'biomass_init': phyto_init,
+                          'phyto_esd_index': phyto_esd.tolist(),
+                          'phyto_esd_label': 'phyto_esd'},
+        'Growth':        {'resource': 'N', 'consumer': 'P',
+                          'mu_max': mu_max_arr, 'halfsat': k_s_arr},
+        'PhytoLoss':     {'population': 'P', 'nutrient': 'N',
+                          'rate': lambda_arr_const},
+        'FN_Forcing':    {'forcing_label': 'FN_supply', 'value': F_N_DEFAULT},
+        'FN_Input':      {'var': 'N', 'forcing': 'FN_supply',
+                          'rate': 1.0 / D_E},
+        'DilutionN':     {'var': 'N', 'rate': DILUTION_RATE},
+        'DilutionP':     {'var': 'P', 'rate': DILUTION_RATE},
+    },
+    solver_kwargs=IVP_SOLVER_KWARGS,
 )
+
 model_setup_open_const_stability = xso.setup(
     solver='stability', model=model_open,
     time=[0, 1],
-    input_vars=_open_inputs(lambda_arr_const),
+    input_vars={
+        'Nutrient':      {'value_label': 'N', 'value_init': N_INIT_OPEN},
+        'Phytoplankton': {'biomass_label': 'P', 'biomass_init': phyto_init,
+                          'phyto_esd_index': phyto_esd.tolist(),
+                          'phyto_esd_label': 'phyto_esd'},
+        'Growth':        {'resource': 'N', 'consumer': 'P',
+                          'mu_max': mu_max_arr, 'halfsat': k_s_arr},
+        'PhytoLoss':     {'population': 'P', 'nutrient': 'N',
+                          'rate': lambda_arr_const},
+        'FN_Forcing':    {'forcing_label': 'FN_supply', 'value': F_N_DEFAULT},
+        'FN_Input':      {'var': 'N', 'forcing': 'FN_supply',
+                          'rate': 1.0 / D_E},
+        'DilutionN':     {'var': 'N', 'rate': DILUTION_RATE},
+        'DilutionP':     {'var': 'P', 'rate': DILUTION_RATE},
+    },
 )
 
-# IVP + stability setups, open-allom
+
+# =============================================================================
+# SETUP — OPEN CHEMOSTAT, SIZE-DEPENDENT Λ(s) = Λ₀ · s^(-0.25)
+# =============================================================================
 model_setup_open_allom = xso.setup(
     solver='solve_ivp', model=model_open,
     time=ivp_time_array,
-    input_vars=_open_inputs(lambda_arr_allom),
+    input_vars={
+        'Nutrient':      {'value_label': 'N', 'value_init': N_INIT_OPEN},
+        'Phytoplankton': {'biomass_label': 'P', 'biomass_init': phyto_init,
+                          'phyto_esd_index': phyto_esd.tolist(),
+                          'phyto_esd_label': 'phyto_esd'},
+        'Growth':        {'resource': 'N', 'consumer': 'P',
+                          'mu_max': mu_max_arr, 'halfsat': k_s_arr},
+        'PhytoLoss':     {'population': 'P', 'nutrient': 'N',
+                          'rate': lambda_arr_allom},
+        'FN_Forcing':    {'forcing_label': 'FN_supply', 'value': F_N_DEFAULT},
+        'FN_Input':      {'var': 'N', 'forcing': 'FN_supply',
+                          'rate': 1.0 / D_E},
+        'DilutionN':     {'var': 'N', 'rate': DILUTION_RATE},
+        'DilutionP':     {'var': 'P', 'rate': DILUTION_RATE},
+    },
+    solver_kwargs=IVP_SOLVER_KWARGS,
 )
+
 model_setup_open_allom_stability = xso.setup(
     solver='stability', model=model_open,
     time=[0, 1],
-    input_vars=_open_inputs(lambda_arr_allom),
+    input_vars={
+        'Nutrient':      {'value_label': 'N', 'value_init': N_INIT_OPEN},
+        'Phytoplankton': {'biomass_label': 'P', 'biomass_init': phyto_init,
+                          'phyto_esd_index': phyto_esd.tolist(),
+                          'phyto_esd_label': 'phyto_esd'},
+        'Growth':        {'resource': 'N', 'consumer': 'P',
+                          'mu_max': mu_max_arr, 'halfsat': k_s_arr},
+        'PhytoLoss':     {'population': 'P', 'nutrient': 'N',
+                          'rate': lambda_arr_allom},
+        'FN_Forcing':    {'forcing_label': 'FN_supply', 'value': F_N_DEFAULT},
+        'FN_Input':      {'var': 'N', 'forcing': 'FN_supply',
+                          'rate': 1.0 / D_E},
+        'DilutionN':     {'var': 'N', 'rate': DILUTION_RATE},
+        'DilutionP':     {'var': 'P', 'rate': DILUTION_RATE},
+    },
 )
