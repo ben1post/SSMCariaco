@@ -173,10 +173,19 @@ load_profile_data <- function() {
 #' @param model_type One of "isotherm" (default) or "isotherm_chl"
 #' @param reference_depth Depth for chlorophyll integration (default 100m)
 #' @return List with: model, model_type, coefficients, r_squared, predictions for all dates
-fit_euphotic_proxy <- function(scenario_data, 
+fit_euphotic_proxy <- function(scenario_data,
                                 niskin_profiles = NULL,
                                 model_type = "isotherm",
-                                reference_depth = 100) {
+                                chl_depth = 20,
+                                chl_agg = "mean") {
+  # chl_depth / chl_agg control the chlorophyll predictor for the "isotherm_chl"
+  # model. DEFAULT (2026-05-31): MEAN chlorophyll over the upper 0-20 m — the
+  # attenuating layer that actually controls the 1% light (euphotic) depth.
+  # PREVIOUS behaviour (SUM over 0-100 m) is recoverable with
+  # chl_depth = 100, chl_agg = "sum". The 0-100 m integral was switched out because
+  # the relaxed deep-chlorophyll-max inflated the predictor without shoaling EuZ,
+  # so the model under-shallowed upwelling (R² 0.717 -> 0.777, RMSE 6.94 -> 6.16 m
+  # with the 0-20 m mean; see Ideas and Findings.md).
   
   # Validate inputs
   if (!model_type %in% c("isotherm", "isotherm_chl")) {
@@ -198,23 +207,28 @@ fit_euphotic_proxy <- function(scenario_data,
   # For isotherm_chl model, calculate integrated chlorophyll
   if (model_type == "isotherm_chl") {
     
-    # Calculate integrated Chl (0-reference_depth) for all dates with Niskin data
+    # Aggregate the upper-layer chlorophyll predictor (0-chl_depth) for all dates
+    # with Niskin data. chl_agg = "mean" (default, 0-20 m) or "sum" (legacy 0-100 m
+    # integral). Column kept as `Chl_integrated` / `log_Chl_int` so the downstream
+    # join, prediction, and result code is unchanged regardless of the choice.
+    if (!chl_agg %in% c("mean", "sum")) stop("chl_agg must be 'mean' or 'sum'")
+    chl_aggfun <- if (chl_agg == "mean") mean else sum
     chl_integrated_all <- niskin_profiles %>%
-      filter(depth <= reference_depth) %>%
+      filter(depth <= chl_depth) %>%
       filter(!is.na(Chlorophyll)) %>%
       group_by(date) %>%
       summarize(
-        Chl_integrated = sum(Chlorophyll, na.rm = TRUE),
+        Chl_integrated = chl_aggfun(Chlorophyll, na.rm = TRUE),
         n_depths = n(),
         max_chl_depth = max(depth),
         .groups = "drop"
       ) %>%
-      # Only keep profiles with reasonable coverage
-      filter(n_depths >= 50) %>%
+      # Require reasonable within-layer coverage (~half the 1 m interpolated levels)
+      filter(n_depths >= chl_depth / 2) %>%
       # Add log-transformed Chl
       mutate(log_Chl_int = log10(Chl_integrated + 0.1))
-    
-    cat(sprintf("Chlorophyll integration (0-%dm):\n", reference_depth))
+
+    cat(sprintf("Chlorophyll predictor: %s over 0-%gm\n", chl_agg, chl_depth))
     cat(sprintf("  Dates with sufficient Chl data: %d\n", nrow(chl_integrated_all)))
     
     # Join to model data
@@ -343,9 +357,10 @@ fit_euphotic_proxy <- function(scenario_data,
     predictions = predictions
   )
   
-  # Add reference depth for isotherm_chl model
+  # Record the chlorophyll-predictor definition for isotherm_chl model
   if (model_type == "isotherm_chl") {
-    result$reference_depth <- reference_depth
+    result$chl_depth <- chl_depth
+    result$chl_agg <- chl_agg
     result$chl_integrated_all <- chl_integrated_all
   }
   
@@ -372,9 +387,12 @@ compare_euphotic_proxy_models <- function(scenario_data,
   model_iso <- fit_euphotic_proxy(scenario_data, model_type = "isotherm")
   
   cat("\n--- Model 2: Isotherm + log(Chl) ---\n")
-  model_iso_chl <- fit_euphotic_proxy(scenario_data, niskin_profiles, 
+  # Legacy comparison: keep the 0-reference_depth INTEGRAL (sum) predictor here so
+  # this diagnostic reproduces the original iso vs iso+integrated-Chl comparison.
+  # The production default in fit_euphotic_proxy is now the 0-20 m mean.
+  model_iso_chl <- fit_euphotic_proxy(scenario_data, niskin_profiles,
                                        model_type = "isotherm_chl",
-                                       reference_depth = reference_depth)
+                                       chl_depth = reference_depth, chl_agg = "sum")
   
   # Comparison summary
   cat("\n=== Model Comparison Summary ===\n")
