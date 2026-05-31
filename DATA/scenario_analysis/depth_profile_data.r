@@ -848,7 +848,10 @@ get_full_scenario_data <- function(profile_data,
                                     proxy_model = NULL,
                                     trap_lag_months = 0,
                                     start_date = as.Date("1995-11-01"),
-                                    end_date = as.Date("2017-01-01")) {
+                                    end_date = as.Date("2017-01-01"),
+                                    boundary_temp_threshold = 22.0,
+                                    boundary_temp_buffer = 0.5,
+                                    boundary_window = 1) {
   
   cat(sprintf("\n=== Building full scenario dataset (mode: %s) ===\n", depth_mode))
   
@@ -893,7 +896,56 @@ get_full_scenario_data <- function(profile_data,
     left_join(scenario_monthly, by = "time_month")
   
   cat(sprintf("  With upwelling class: %d months\n", sum(!is.na(backbone$upwelling))))
-  
+
+  # =========================================================================
+  # 2b. BOUNDARY-MONTH RECLASSIFICATION (transition class)
+  # =========================================================================
+  # Near-threshold relaxed months immediately adjacent to an upwelling month are
+  # ecologically tied to that upwelling event but mislabelled "relaxed" by the
+  # sharp temp_50m cut. The criterion is purely PHYSICAL/TEMPORAL (settled
+  # 2026-05-31; see MS3 Project Background.md "Regime split"): relaxed AND
+  # temp_50m within `boundary_temp_buffer` of the threshold AND an upwelling
+  # month within +/- `boundary_window` months. Size / NO3 / PP are NOT used as
+  # classifiers (that would make the regime contrast self-fulfilling); they are
+  # diagnostic only. Flagged months are routed to a `transition` class in
+  # `regime_adjusted` and excluded from BOTH canonical composites; the original
+  # `upwelling` column is left untouched for traceability and the
+  # "fold-transition-into-upwelling" sensitivity variant.
+  #   boundary_flag   : TRUE for the reclassified months
+  #   boundary_adj    : 'leading' (an upwelling month follows within window),
+  #                     'trailing' (one precedes), 'both', or '' (not adjacent)
+  #   regime_adjusted : 'transition' if boundary_flag, else `upwelling`
+
+  backbone <- backbone %>%
+    arrange(date) %>%
+    mutate(month_idx = year * 12 + (month - 1))
+
+  up_months <- backbone$month_idx[backbone$upwelling == "upwelling" &
+                                    !is.na(backbone$upwelling)]
+
+  adj_dir <- function(mi) {
+    if (is.na(mi)) return("")
+    before <- any((mi - seq_len(boundary_window)) %in% up_months)  # upwelling precedes -> trailing
+    after  <- any((mi + seq_len(boundary_window)) %in% up_months)  # upwelling follows  -> leading
+    if (before && after) "both" else if (after) "leading" else if (before) "trailing" else ""
+  }
+
+  backbone <- backbone %>%
+    mutate(
+      boundary_adj = vapply(month_idx, adj_dir, character(1)),
+      boundary_flag = !is.na(upwelling) & upwelling == "relaxed" &
+        !is.na(temp_50m) &
+        temp_50m > boundary_temp_threshold &
+        temp_50m <= boundary_temp_threshold + boundary_temp_buffer &
+        boundary_adj != "",
+      regime_adjusted = ifelse(boundary_flag, "transition", as.character(upwelling))
+    ) %>%
+    select(-month_idx)
+
+  cat(sprintf("  Boundary reclassification: %d relaxed months -> 'transition' (buffer=%.2f C, window=%d)\n",
+              sum(backbone$boundary_flag, na.rm = TRUE),
+              boundary_temp_buffer, boundary_window))
+
   # =========================================================================
   # 3. ASSIGN DEPTH CUTOFFS
   # =========================================================================

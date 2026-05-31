@@ -112,29 +112,44 @@ ESD_MAX   = 200.0
 IVP_TIME_END   = 5000
 ivp_time_array = np.arange(0, IVP_TIME_END, 1)
 
-# scipy.integrate.solve_ivp kwargs forwarded via XSO's solver_kwargs hook
-# (added 2026-05-18, simplified 2026-05-20).
+# scipy.integrate.solve_ivp method + tolerances (passed via XSO's
+# solver_kwargs hook added 2026-05-18).
 #
-# History note: an earlier revision of this block specified
-# method='LSODA' with atol=1e-6 / rtol=1e-4 to address a perceived
-# stiffness symptom on matched-Type-II NPZ runs (~95 min wall on the
-# full 5000 d horizon). The 2026-05-20 diagnostic exercise showed that
-# the slowness was specific to LSODA's auto-stiff heuristic on this
-# regime — naive RK45 with scipy default tolerances clears the same
-# run in ~2 min. The matched-Type-II case isn't inherently stiff;
-# explicit-RK is the right tool.
+# LSODA auto-switches between Adams (non-stiff) and BDF (stiff) and
+# is the safe default for size-spectrum systems with mixed regimes.
 #
-# We keep only the instability-event override (the -1e-3 negative
-# floor): Type-II predator-prey transients can legitimately dip below
-# the default -1e-6 floor without indicating real instability, and
-# loosening the threshold avoids spurious run terminations. All other
-# kwargs (method, atol, rtol) fall back to scipy / IVPSolver defaults
-# — method='RK45', rtol=1e-6, atol=1e-9.
-#
-# If a future variant turns out to be genuinely stiff (wider rate
-# spread, fish forcing, etc.), switch that setup to solver='stiff_ivp'
-# rather than tweaking these kwargs.
+# Tolerances loosened from XSO's RK45 defaults (atol=1e-9, rtol=1e-6).
+# In competitive-exclusion N-P dynamics, ~40 loser classes spend long
+# stretches at <1e-6 mmol N m-3 — biologically noise — and tight atol
+# forces the step controller to spend most of its budget tracking
+# those values faithfully. The relaxed values match the physically
+# meaningful precision: any concentration below ~1e-6 is rounding,
+# and 1e-4 relative is finer than every comparison we make in the
+# manuscript metrics. Final-state comparison after this change should
+# still match RK45/default-tol within fractions of a percent.
 IVP_SOLVER_KWARGS = {
+    'method': 'LSODA', 'atol': 1e-6, 'rtol': 1e-4,
+    # 2026-05-19: configurable instability-event threshold (XSO update of
+    # the same date). Loosens XSO's default `-1e-6` negative-state floor
+    # to `-1e-3`. Rationale: the Type II NPZ setups have legitimate
+    # transient predator-prey overshoots in the `-1e-6` to `-1e-5` range
+    # — well within physical noise for biomass values that equilibrate
+    # at 0.1–1 mmol N m⁻³ — and the default floor was terminating those
+    # runs as if they were genuinely unstable. The `-1e-3` choice gives
+    # ~500× head-room over the observed transient excursions and is
+    # still 3 orders of magnitude below typical equilibrium biomass,
+    # so it catches actual blow-ups without flagging Lotka-Volterra
+    # bottoming-out. Applies uniformly to NP and NPZ setups; NP runs
+    # don't produce values anywhere near this floor so the change is
+    # invisible there.
+    #
+    # History: an earlier `IVP_SOLVER_KWARGS_STRICT` variant (atol=1e-9 +
+    # max_step=1.0) and the switch to Banas-style distributed quadratic
+    # closure (`ZooQuadraticLoss_recycled`) both predate this fix. The
+    # quadratic closure is kept on scientific grounds (Banas 2011 / MS3
+    # structural alignment) even though the threshold change alone would
+    # also have solved the symptom — the quadratic closure is the right
+    # model, the loose threshold is the right safety net.
     'instability_neg_threshold': -1e-3,
 }
 
@@ -356,7 +371,7 @@ model_open = xso.create({
 # SETUP — CLOSED, SIZE-INDEPENDENT Λ
 # =============================================================================
 model_setup_closed_const = xso.setup(
-    solver='stiff_ivp', model=model_closed,
+    solver='solve_ivp', model=model_closed,
     time=ivp_time_array,
     input_vars={
         'Nutrient':      {'value_label': 'N', 'value_init': N_INIT_CLOSED},
@@ -391,7 +406,7 @@ model_setup_closed_const_stability = xso.setup(
 # SETUP — CLOSED, SIZE-DEPENDENT Λ(s) = Λ₀ · s^(-0.25)
 # =============================================================================
 model_setup_closed_allom = xso.setup(
-    solver='stiff_ivp', model=model_closed,
+    solver='solve_ivp', model=model_closed,
     time=ivp_time_array,
     input_vars={
         'Nutrient':      {'value_label': 'N', 'value_init': N_INIT_CLOSED},
@@ -426,7 +441,7 @@ model_setup_closed_allom_stability = xso.setup(
 # SETUP — OPEN CHEMOSTAT, SIZE-INDEPENDENT Λ
 # =============================================================================
 model_setup_open_const = xso.setup(
-    solver='stiff_ivp', model=model_open,
+    solver='solve_ivp', model=model_open,
     time=ivp_time_array,
     input_vars={
         'Nutrient':      {'value_label': 'N', 'value_init': N_INIT_OPEN},
@@ -471,7 +486,7 @@ model_setup_open_const_stability = xso.setup(
 # SETUP — OPEN CHEMOSTAT, SIZE-DEPENDENT Λ(s) = Λ₀ · s^(-0.25)
 # =============================================================================
 model_setup_open_allom = xso.setup(
-    solver='stiff_ivp', model=model_open,
+    solver='solve_ivp', model=model_open,
     time=ivp_time_array,
     input_vars={
         'Nutrient':      {'value_label': 'N', 'value_init': N_INIT_OPEN},
