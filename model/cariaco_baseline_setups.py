@@ -244,3 +244,50 @@ model_setup_baseline_fish = xso.setup(
     },
     solver_kwargs=IVP_SOLVER_KWARGS,
 )
+
+
+# =============================================================================
+# TYPE III VARIANT — Option A baseline with Holling Type III matched grazing
+# =============================================================================
+# Identical to model_baseline / model_setup_baseline in every respect EXCEPT the
+# grazing functional response (MatchedGrazing_TypeIII: low-prey refuge, G ∝ P²
+# at low prey). Rohr 2022 (Survey §7): Type III far more stable than Type II
+# (1.7% vs 37.5% of cases unstable). Same input_vars slots (Imax, KsZ, gamma) —
+# no other change. Built for the Type II vs Type III stability assessment.
+model_baseline_t3 = xso.create({
+    'Nutrient':      Nutrient,
+    'Phytoplankton': PhytoSizeSpectrum,
+    'Zooplankton':   ZooSizeSpectrum,
+    'Supply':        StockNutrientSupply,
+    'Growth':        MonodGrowth_NP,
+    'Grazing':       MatchedGrazing_TypeIII,
+    'PhytoLoss':     PhytoLinearLoss_recycled,
+    'ZooLoss':       ZooLinearLoss_recycled,
+    'PhytoSinking':  PhytoSinking_export,
+})
+
+model_setup_baseline_t3 = xso.setup(
+    solver='solve_ivp', model=model_baseline_t3,
+    time=ivp_time_array,
+    input_vars={
+        'Nutrient':      {'value_label': 'N', 'value_init': N_INIT},
+        'Phytoplankton': {'biomass_label': 'P', 'biomass_init': phyto_init,
+                          'phyto_esd_index': phyto_esd.tolist(),
+                          'phyto_esd_label': 'phyto_esd'},
+        'Zooplankton':   {'biomass_label': 'Z', 'biomass_init': zoo_init,
+                          'zoo_esd_index': zoo_esd.tolist(),
+                          'zoo_esd_label': 'zoo_esd'},
+        'Supply':        {'var': 'N', 'FN': FN_DEFAULT, 'de': DE_DEFAULT},
+        'Growth':        {'resource': 'N', 'consumer': 'P',
+                          'mu_max': mu_max_arr, 'halfsat': ks_arr},
+        'Grazing':       {'phyto': 'P', 'zoo': 'Z', 'nutrient': 'N',
+                          'Imax': Imax_arr, 'KsZ': KsZ_arr,
+                          'gamma': GAMMA_VAL},
+        'PhytoLoss':     {'population': 'P', 'nutrient': 'N',
+                          'rate': lambda_arr},
+        'ZooLoss':       {'population': 'Z', 'nutrient': 'N',
+                          'rate': delta_arr},
+        'PhytoSinking':  {'population': 'P', 'w_over_de': W_OVER_DE},
+    },
+    solver_kwargs=IVP_SOLVER_KWARGS,
+)
