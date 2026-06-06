@@ -27,7 +27,11 @@ TARGET_EXTRACTORS = {
     'zoo':      'Zooplankton__biomass',
     'nutrient': 'Nutrient__value',
     'detritus': 'Detritus__value',
-    'export':   'DetritusSink__sinking_value',
+    # The export sink differs by construct: the no-detritus baseline sinks
+    # phytoplankton directly (PhytoSinking), while the NPZD ssm model sinks
+    # detritus (DetritusSink). A tuple lists candidates; the first one present
+    # in the scan output is used, so the same cost path serves both.
+    'export':   ('PhytoSinking__sinking_value', 'DetritusSink__sinking_value'),
     'pp':       'Growth__uptake_value',
 }
 
@@ -351,14 +355,34 @@ def _adaptive_time_collapser(da, avg_window=None):
     return da.isel(time=slice(-avg_window, None)).mean('time')
 
     
+def _resolve_extractor_var(t, results_ds):
+    """Resolve a target type's XSO output variable name from TARGET_EXTRACTORS.
+
+    The entry may be a single string or a tuple of candidate names (e.g. the
+    export sink, which is PhytoSinking__sinking_value in the baseline and
+    DetritusSink__sinking_value in the NPZD ssm model). For a tuple, the first
+    candidate present in `results_ds` is returned, so the same post-processing
+    serves model variants with different sink/export components.
+    """
+    spec = TARGET_EXTRACTORS[t]
+    candidates = (spec,) if isinstance(spec, str) else tuple(spec)
+    for name in candidates:
+        if name in results_ds.variables:
+            return name
+    raise ValueError(
+        f"Target type '{t}' requires one of {candidates} in results_ds, "
+        f"but none are present."
+    )
+
+
 def _build_state_das(results_ds, bin_definitions, avg_window=None):
     """Extract target-type DataArrays from scan output, collapsing time.
 
-    Walks over the unique target types in `bin_definitions`, looks each one
-    up in TARGET_EXTRACTORS to find its XSO output variable name, and
-    applies `_adaptive_time_collapser` so the caller doesn't need to know
-    whether the input is a raw IVP scan, a post-processed IVP scan, or a
-    stability scan.
+    Walks over the unique target types in `bin_definitions`, resolves each one
+    to its XSO output variable name via `_resolve_extractor_var` (allowing
+    construct-specific candidates), and applies `_adaptive_time_collapser` so
+    the caller doesn't need to know whether the input is a raw IVP scan, a
+    post-processed IVP scan, or a stability scan.
     """
     state_das = {}
     for t in set(b['type'] for b in bin_definitions):
@@ -367,12 +391,7 @@ def _build_state_das(results_ds, bin_definitions, avg_window=None):
                 f"Unknown target type '{t}' in bin_definitions. "
                 f"Supported: {sorted(TARGET_EXTRACTORS)}."
             )
-        var_name = TARGET_EXTRACTORS[t]
-        if var_name not in results_ds.variables:
-            raise ValueError(
-                f"Target type '{t}' requires '{var_name}' in results_ds "
-                f"but it is not present."
-            )
+        var_name = _resolve_extractor_var(t, results_ds)
         state_das[t] = _adaptive_time_collapser(results_ds[var_name], avg_window)
     return state_das
 
@@ -870,7 +889,7 @@ def get_default_from_setup(model_setup, param_name):
 # =============================================================================
 # STEADY-STATE SEED EXTRACTION
 # =============================================================================
-def extract_steady_state_seed(scan_results, avg_window):
+def extract_steady_state_seed(scan_results, avg_window, state_vars=None):
     """
     Build an initial-value seed dataset + iv_mapping from an IVP scan,
     by averaging each state variable over the last `avg_window` timesteps.
@@ -878,16 +897,49 @@ def extract_steady_state_seed(scan_results, avg_window):
     Intended to feed into run_xso_stabilityscan(..., initial_values_ds=seed_ds,
     iv_mapping=iv_map).
 
-    State variables are hardcoded for the CARIACO NPZD setup:
-        Nutrient__value, Phytoplankton__biomass,
-        Zooplankton__biomass, Detritus__value
+    Parameters
+    ----------
+    scan_results : xarray.Dataset
+        Raw IVP scan output (time dim length > 2).
+    avg_window : int
+        Number of trailing timesteps to average for the seed.
+    state_vars : list of str or None, optional
+        State-variable output names to seed. If None (default), auto-detect:
+        take the known NPZ(D) candidate set and keep those present in
+        `scan_results`. So a no-detritus model seeds 3 variables and an NPZD
+        model seeds 4, with no caller change. Pass an explicit list to seed a
+        model with a different state-variable set.
+
+    Returns
+    -------
+    seed_ds : xarray.Dataset
+        Tail-mean of each seeded state variable (time dim collapsed).
+    iv_mapping : dict
+        {output_var_name: input_init_slot_name}, e.g.
+        {'Phytoplankton__biomass': 'Phytoplankton__biomass_init'}.
     """
-    state_vars = [
+    CANDIDATE_STATE_VARS = [
         'Nutrient__value',
         'Phytoplankton__biomass',
         'Zooplankton__biomass',
         'Detritus__value',
     ]
+    if state_vars is None:
+        state_vars = [v for v in CANDIDATE_STATE_VARS
+                      if v in scan_results.variables]
+    else:
+        missing = [v for v in state_vars if v not in scan_results.variables]
+        if missing:
+            raise ValueError(
+                f"extract_steady_state_seed: requested state_vars not present "
+                f"in scan_results: {missing}."
+            )
+    if not state_vars:
+        raise ValueError(
+            "extract_steady_state_seed: no state variables found in "
+            f"scan_results (looked for {CANDIDATE_STATE_VARS}). "
+            "Pass state_vars explicitly."
+        )
 
     seed_ds = (scan_results[state_vars]
                .isel(time=slice(-avg_window, None))
@@ -935,3 +987,231 @@ def run_single_point(model, model_setup, scan_params, fixed_overrides=None):
         overrides.update(fixed_overrides)
     with model:
         return model_setup.xsimlab.update_vars(input_vars=overrides).xsimlab.run()
+
+
+# =============================================================================
+# REGIME DIAGNOSTIC PROCESSING  (single IVP run -> plot-ready structures)
+# =============================================================================
+def phyto_bin_matrix(phyto_esd, bin_definitions):
+    """(n_phyto_bins, n_classes) fractional-log-overlap weight matrix.
+
+    Row k, column i = the fraction of model phyto class i's log-width that
+    falls inside phyto target k's [size_min, size_max]. This is the same
+    operator aggregate_model_to_targets applies per timepoint, precomputed as a
+    matrix so a whole tail of timesteps can be binned with one matrix product.
+    Row order follows the 'phyto'-type entries of bin_definitions (Pico..Micro).
+    """
+    p_edges = get_log_bin_edges(np.asarray(phyto_esd))
+    phyto_defs = [b for b in bin_definitions if b['type'] == 'phyto']
+    W = np.zeros((len(phyto_defs), len(phyto_esd)))
+    for k, b in enumerate(phyto_defs):
+        for i in range(len(phyto_esd)):
+            W[k, i] = get_fraction_in_range(
+                p_edges[i], p_edges[i + 1], b['size_min'], b['size_max'])
+    return W
+
+
+def process_regime_run(out, phyto_esd, zoo_esd, bin_definitions,
+                       tail_len=1000, bin_geomeans=None,
+                       zoo_bands=((0.0, 200.0), (200.0, 500.0)),
+                       zoo_cumulative=(200.0, 500.0)):
+    """Reduce one raw IVP output into model-side structures for the regime
+    diagnostic, binned identically to the obs side.
+
+    The open Stock system limit-cycles, so the tail window is treated as a
+    DISTRIBUTION (the orbit) rather than collapsed to a single value: per-step
+    bin biomass and mean cell size over the last `tail_len` steps are returned
+    so the plot can show medians + 10-90% bands the same way the obs monthly
+    spread is shown. Phyto binning uses the fractional-log-overlap matrix
+    (matches aggregate_model_to_targets / the obs Pico-Nano-Micro definition);
+    zoo bands use cumulative ESD thresholds (matching the >200 / >500 µm
+    net-tow obs semantics).
+
+    Parameters
+    ----------
+    out : xarray.Dataset
+        Full IVP output (needs Phytoplankton__biomass, Zooplankton__biomass;
+        Nutrient__value used if present).
+    phyto_esd, zoo_esd : 1D arrays of size-class ESD (µm).
+    bin_definitions : list of dict (the 'phyto' entries drive the binning).
+    tail_len : int, trailing window summarising the orbit.
+    bin_geomeans : phyto-bin geomean ESDs for mean cell size; defaults to
+        CARIACO_PHYTO_BIN_GEOMEANS.
+    zoo_bands : tuple of (lo, hi) ESD bands for the model-only small/large
+        zoo panels.
+    zoo_cumulative : ESD thresholds for cumulative >threshold zoo biomass
+        (the model analogue of the zoo_gt200 / zoo_gt500 obs).
+
+    Returns
+    -------
+    dict with keys:
+      't', 'sumP', 'sumZ'   : full time series (n_time,)
+      'cv'                  : CV(ΣP) over the tail (scalar; orbit amplitude)
+      'Pspec', 'Zspec'      : tail-MEAN per-class spectra (n_phyto,), (n_zoo,)
+      'mcs_tail'            : mean cell size per tail step (tail_len,) µm
+      'sumP_tail'           : ΣP per tail step (tail_len,)
+      'phyto_bins_tail'     : (n_phyto_bins, tail_len) per-step bin biomass
+      'phyto_bin_labels'    : labels for the phyto bins
+      'zoo_band_tail'       : dict {'lo-hi': (tail_len,)} model-only zoo bands
+      'zoo_cum_tail'        : dict {'gtThr': (tail_len,)} cumulative zoo biomass
+      'N_tail_mean'         : scalar (only if Nutrient__value present)
+    """
+    if bin_geomeans is None:
+        bin_geomeans = CARIACO_PHYTO_BIN_GEOMEANS
+    bin_geomeans = np.asarray(bin_geomeans, dtype=float)
+
+    P = out['Phytoplankton__biomass'].values         # (n_phyto, n_time)
+    Z = out['Zooplankton__biomass'].values            # (n_zoo,   n_time)
+    n_time = P.shape[1]
+    t = out['time'].values if 'time' in out.coords else np.arange(n_time)
+
+    sumP = P.sum(axis=0)
+    sumZ = Z.sum(axis=0)
+
+    tail = slice(-tail_len, None)
+    P_tail = P[:, tail]
+    Z_tail = Z[:, tail]
+
+    sP_tail = sumP[tail]
+    cv = float(sP_tail.std() / max(sP_tail.mean(), 1e-12))
+
+    # Phyto bins over the tail via the fractional-overlap matrix
+    W = phyto_bin_matrix(phyto_esd, bin_definitions)  # (n_bins, n_phyto)
+    phyto_bins_tail = W @ P_tail                      # (n_bins, tail)
+    bin_tot = phyto_bins_tail.sum(axis=0)
+    frac_tail = np.divide(phyto_bins_tail, bin_tot,
+                          out=np.full_like(phyto_bins_tail, np.nan),
+                          where=bin_tot > 0)
+    mcs_tail = 10.0 ** (np.log10(bin_geomeans) @ frac_tail)   # (tail,) µm
+
+    phyto_bin_labels = [b['label'] for b in bin_definitions
+                        if b['type'] == 'phyto']
+
+    zoo_esd = np.asarray(zoo_esd)
+    zoo_band_tail = {
+        f'{lo:g}-{hi:g}': Z_tail[(zoo_esd >= lo) & (zoo_esd < hi)].sum(axis=0)
+        for lo, hi in zoo_bands
+    }
+    zoo_cum_tail = {
+        f'gt{int(thr)}': Z_tail[zoo_esd >= thr].sum(axis=0)
+        for thr in zoo_cumulative
+    }
+
+    result = dict(
+        t=t, sumP=sumP, sumZ=sumZ, cv=cv,
+        Pspec=P_tail.mean(axis=1), Zspec=Z_tail.mean(axis=1),
+        mcs_tail=mcs_tail, sumP_tail=sP_tail,
+        phyto_bins_tail=phyto_bins_tail, phyto_bin_labels=phyto_bin_labels,
+        zoo_band_tail=zoo_band_tail, zoo_cum_tail=zoo_cum_tail,
+    )
+    if 'Nutrient__value' in out:
+        result['N_tail_mean'] = float(out['Nutrient__value'].values[tail].mean())
+    return result
+
+
+def process_regime_obs(monthly_df, bin_definitions, bin_geomeans=None):
+    """Per-month obs distributions for the regime diagnostic, aligned with the
+    model-side structures from process_regime_run.
+
+    Operates on the monthly_df returned by load_cariaco_targets (already
+    filtered to the regime's months). Phyto mean cell size is computed per
+    month from the Pico/Nano/Micro biomass columns with the same geomeans as
+    the model side, so model and obs mean-cell-size are like-for-like.
+
+    Returns
+    -------
+    dict with per-month arrays:
+      'mcs'              : mean cell size per month (µm)
+      'sumP'             : total phyto biomass per month
+      'phyto_bins'       : list of per-month arrays, one per phyto bin
+      'phyto_bin_labels' : labels for the phyto bins
+      'zoo'              : dict {zoo target label: per-month values (NaN-dropped)}
+    """
+    if bin_geomeans is None:
+        bin_geomeans = CARIACO_PHYTO_BIN_GEOMEANS
+    bin_geomeans = np.asarray(bin_geomeans, dtype=float)
+
+    phyto_defs = [b for b in bin_definitions if b['type'] == 'phyto']
+    pcols = [b['column'] for b in phyto_defs]
+    P = monthly_df[pcols].dropna().values             # (n_months, n_bins)
+    frac = P / P.sum(axis=1, keepdims=True)
+    mcs = 10.0 ** (frac @ np.log10(bin_geomeans))
+
+    zoo_defs = [b for b in bin_definitions if b['type'] == 'zoo']
+    zoo = {b['label']: monthly_df[b['column']].dropna().values
+           for b in zoo_defs if b['column'] in monthly_df.columns}
+
+    return dict(
+        mcs=mcs, sumP=P.sum(axis=1),
+        phyto_bins=[P[:, k] for k in range(P.shape[1])],
+        phyto_bin_labels=[b['label'] for b in phyto_defs],
+        zoo=zoo,
+    )
+
+
+def report_regime_diagnostic(model_by_regime, obs_by_regime,
+                             regimes=('upwelling', 'relaxed'),
+                             forcing_by_regime=None, stab_by_regime=None):
+    """Compact, copy-pasteable ASCII summary of the regime diagnostic.
+
+    Reports model (orbit median over the tail) vs obs (monthly median) per
+    regime — mean cell size, total phyto biomass, Pico/Nano/Micro fractions,
+    cumulative zoo, the orbit CV, and (if given) the stability result. Prints
+    and returns the text, so it can be pasted back for model-comparison
+    checking without the figure.
+
+    Parameters
+    ----------
+    model_by_regime : dict {regime: process_regime_run output}.
+    obs_by_regime   : dict {regime: process_regime_obs output}.
+    forcing_by_regime : optional dict {regime: {'Inflow__FN', 'Inflow__de'}}
+        to print the forcing in each regime header.
+    stab_by_regime  : optional dict {regime: {'stab': hook.get_results()}}.
+    """
+    out = []
+
+    def emit(s=''):
+        out.append(s)
+
+    def row(name, mv, ov=None):
+        if ov is None or not np.isfinite(ov) or ov == 0:
+            emit(f"  {name:16s}{mv:10.3f}")
+        else:
+            emit(f"  {name:16s}{mv:10.3f}{ov:10.3f}{mv / ov:8.2f}")
+
+    for r in regimes:
+        m, o = model_by_regime[r], obs_by_regime[r]
+        head = r.upper()
+        if forcing_by_regime is not None:
+            f = forcing_by_regime[r]
+            head += f"   (F_N={f['Inflow__FN']:.2f}, d_e={f['Inflow__de']:.1f})"
+        emit(f"=== {head} ===")
+        emit(f"  {'':16s}{'model':>10s}{'obs':>10s}{'m/o':>8s}")
+
+        row('mean cell um', np.nanmedian(m['mcs_tail']), np.nanmedian(o['mcs']))
+        row('sumP mmolN/m3', np.nanmedian(m['sumP_tail']), np.nanmedian(o['sumP']))
+
+        mbins = np.nanmedian(m['phyto_bins_tail'], axis=1)
+        obins = np.array([np.nanmedian(b) for b in o['phyto_bins']])
+        mfrac = mbins / mbins.sum() if mbins.sum() > 0 else mbins * np.nan
+        ofrac = obins / obins.sum() if obins.sum() > 0 else obins * np.nan
+        for k, lab in enumerate(m['phyto_bin_labels']):
+            row(f"{lab.split()[0]} frac", mfrac[k], ofrac[k])
+
+        ocum = list(o['zoo'].values())
+        for k, ck in enumerate(m['zoo_cum_tail'].keys()):
+            mv = np.nanmedian(m['zoo_cum_tail'][ck])
+            ov = (np.nanmedian(ocum[k]) if (k < len(ocum) and len(ocum[k])) else None)
+            row(f"zoo {ck}", mv, ov)
+
+        row('CV(sumP)', m['cv'])
+        if stab_by_regime is not None and r in stab_by_regime:
+            s = stab_by_regime[r]['stab']
+            emit(f"  {'stability':16s}{s['stability']:>10s}   "
+                 f"max Re(lam)={s['max_eigenvalue_real']:+.4f}  "
+                 f"{s['n_positive_eigenvalues']} pos, {s['n_complex_pairs']} pairs")
+        emit()
+
+    text = '\n'.join(out)
+    print(text)
+    return text

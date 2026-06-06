@@ -112,9 +112,10 @@ def load_cariaco_targets(regime='all', csv_path=DEFAULT_CSV_PATH,
     bin_definitions : list of dict
         The bin definitions used, same order as obs_vec.
     monthly_df : pd.DataFrame
-        The filtered monthly dataframe with only the target columns
-        (plus 'date', 'time_month', 'upwelling', 'ui' for reference).
-        Useful for boxplots / variance analysis.
+        The filtered monthly dataframe with the target columns, the per-month
+        forcing columns ('FN_mmolN_m2_d', 'depth_cutoff'), and context columns
+        ('date', 'time_month', 'upwelling', 'ui', ...). Useful for boxplots /
+        variance analysis and the regime-forcing figure.
     forcing : dict
         Regime-specific model forcing keyed by XSO parameter name:
         {'Inflow__FN': float, 'Inflow__de': float}. Pass directly as
@@ -163,12 +164,19 @@ def load_cariaco_targets(regime='all', csv_path=DEFAULT_CSV_PATH,
             f"months must be 'available', 'hplc', or 'complete', got '{months}'."
         )
 
-    # Extract target + context columns for the returned monthly df
+    # Extract target + context + forcing columns for the returned monthly df.
+    # The per-month forcing columns (F_N and box depth) are carried so the
+    # regime-forcing figure can boxplot their monthly distributions; they feed
+    # the `forcing` dict below but are NOT model-data comparison targets.
     context_cols = [c for c in ('date', 'time_month', 'upwelling', 'ui',
                                 'regime_adjusted', 'boundary_flag')
                     if c in subset.columns]
+    forcing_cols = [c for c in ('FN_mmolN_m2_d', 'depth_cutoff')
+                    if c in subset.columns]
     diagnostic_cols = [c for c in DIAGNOSTIC_COLS if c in subset.columns]
-    monthly_df = subset[context_cols + target_cols + diagnostic_cols].copy()
+    keep_cols = list(dict.fromkeys(
+        context_cols + forcing_cols + target_cols + diagnostic_cols))
+    monthly_df = subset[keep_cols].copy()
 
     # Collapse each regime's months to one value per target with the chosen
     # statistic (NaN-safe). 'median' down-weights the large-cell bloom tail (the

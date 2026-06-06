@@ -80,11 +80,18 @@ class StockNutrientSupply:
     surface layer; d_e is the box depth (m). For MS3 Cariaco, F_N is
     derived per month from Laws-2011 f-ratio × PP (see depth_profile_data.r).
     Mirrors cariaco_ssm_comps.StockNutrientSupply.
+
+    d_e is a *broadcast* parameter so PhytoSinking foreign-references the same
+    value: one regime d_e then fully specifies the box geometry — supply
+    F_N/d_e and sinking w_sink/d_e both follow from it, with no duplicated
+    depth bookkeeping. (Relies on the XSO broadcast-parameter fix.)
     """
     var = xso.variable(foreign=True, flux='input', negative=False,
                        description='nutrient receiving the supply')
     FN = xso.parameter(description='new-nutrient flux F_N [mmol N m-2 d-1]')
-    de = xso.parameter(description='euphotic box depth d_e [m]')
+    de = xso.parameter(broadcast=True,
+                       description='euphotic box depth d_e [m] (broadcast; '
+                                   'shared with PhytoSinking)')
 
     @xso.flux
     def input(self, var, FN, de):
@@ -316,12 +323,18 @@ class PhytoSinking_export:
     Iteration-1 default: scalar w_sink. Size-dependent option (Ward 2012,
     Laws 1975: w_p = 0.28 · V^0.39 m/d) is a candidate numbered deviation
     for later iterations.
+
+    d_e is foreign-referenced from the Inflow supply component (broadcast), so
+    setting one regime d_e drives both supply (F_N/d_e) and sinking (w_sink/d_e);
+    w_sink is a true constant.
     """
     population = xso.variable(foreign=True, dims='phyto',
                               flux='sinking', negative=True,
                               description='phyto (per-class sink)')
-    w_over_de = xso.parameter(description='w_sink / d_e [d-1]')
+    w_sink = xso.parameter(description='sinking velocity w_sink [m d-1]')
+    de = xso.parameter(foreign=True,
+                       description='euphotic box depth d_e [m] (shared from Inflow)')
 
     @xso.flux(dims='phyto')
-    def sinking(self, population, w_over_de):
-        return w_over_de * population
+    def sinking(self, population, w_sink, de):
+        return (w_sink / de) * population

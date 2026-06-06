@@ -1,11 +1,14 @@
 """
 Cariaco baseline NPZ model setups (Option A)
 ============================================
-Iteration-1 IVP setup for the MS3 manuscript baseline:
+Iteration-1 setups for the MS3 manuscript baseline:
 Taniguchi 2014 Model 1 biology + Stock-style physical extensions.
 
-Builds the model from cariaco_baseline_comps and creates an IVP setup for
-size-spectrum diagnostic runs. F_N is the scan axis ('Supply__FN').
+Builds the model from cariaco_baseline_comps and creates IVP, slim-IVP, and
+steady-state/stability setups for size-spectrum diagnostic runs and parameter
+scans. F_N is the scan axis ('Inflow__FN'); the regime forcing dict returned by
+cariaco_obs.load_cariaco_targets ({'Inflow__FN', 'Inflow__de'}) drops straight
+in as fixed_overrides / input_vars_override.
 
 Iteration-1 parameter choices and their literature anchors:
 - Allometries:  Taniguchi 2014 Table 1 verbatim (μ_max, k_s, I_max, K_sZ).
@@ -17,11 +20,18 @@ Iteration-1 parameter choices and their literature anchors:
 - Λ (phyto):    0.0015 d-1 (Taniguchi Table 1; tuned for Z:P, NOT for slope)
 - Δ (zoo):      0.025 d-1 (Taniguchi Table 1; tuned for Z:P, NOT for slope)
 - Grazing:      matched single-prey, Holling Type II (Taniguchi M1 verbatim)
-- Supply:       Stock 2008 Eq. 7: F_N/d_e, no chemostat dilution
-- Sinking:      w_sink/d_e = 0.1 d-1 (MS3-as-built: w_sink=5 m/d, d_e=50 m)
+- Supply:       Stock 2008 Eq. 7: F_N/d_e (component label 'Inflow')
+- Sinking:      w_sink = 5 m/d; d_e is broadcast from Inflow and foreign-
+                referenced by PhytoSinking, so the export rate w_sink/d_e
+                follows the one regime depth without a w_over_de param.
 - No detritus, no fish kernel (iteration-1 baseline)
 - Grid:         12 phyto (0.5-200 µm) + 12 zoo (5-2000 µm), log-spaced
                 (MS3-as-built grid; Model Equations.md §1)
+
+Setups exposed at module scope (parscan contract — xso.parscans imports these
+by name): per model variant a full-output IVP setup (single diagnostic runs),
+a slim-output IVP setup (parameter scans), and a stability setup (fsolve +
+eigenvalues, time=[0,1]).
 
 References:
 - Taniguchi, Franks & Poulin 2014 MEPS 514:13-33 (Table 1 allometries)
@@ -89,10 +99,12 @@ delta_arr  = np.full(N_CLASSES, DELTA_VAL)
 # =============================================================================
 # STOCK PHYSICAL SETUP
 # =============================================================================
+# d_e is a single broadcast parameter on the Inflow component; PhytoSinking
+# foreign-references it, so supply (F_N/d_e) and sinking (w_sink/d_e) both
+# follow from one regime depth. No W_OVER_DE constant.
 FN_DEFAULT = 2.67           # mmol N m-2 d-1 ('all'-regime mean per cariaco_obs)
 DE_DEFAULT = 50.0           # m, MS3-as-built box depth
-W_SINK     = 5.0            # m/d, MS3-as-built sinking rate
-W_OVER_DE  = W_SINK / DE_DEFAULT     # 0.1 d-1
+W_SINK     = 5.0            # m/d, MS3-as-built sinking velocity
 
 
 # =============================================================================
@@ -117,31 +129,26 @@ IVP_SOLVER_KWARGS = {
     'instability_neg_threshold': -1e-3,
 }
 
+# Stability solver runs fsolve + eigenvalues; XSO convention is a length-2
+# time array (initial state at [0], steady state at [-1]).
+STAB_TIME = [0.0, 1.0]
 
-# =============================================================================
-# MODEL — Option A: Taniguchi M1 biology + Stock supply + phyto sinking
-# =============================================================================
-# To swap functional response: replace 'Grazing': MatchedGrazing_TypeII
-# with MatchedGrazing_TypeIII below. No other changes needed (same input
-# slots, same output flux structure).
-model_baseline = xso.create({
-    'Nutrient':      Nutrient,
-    'Phytoplankton': PhytoSizeSpectrum,
-    'Zooplankton':   ZooSizeSpectrum,
-    'Supply':        StockNutrientSupply,
-    'Growth':        MonodGrowth_NP,
-    'Grazing':       MatchedGrazing_TypeII,     # swap to MatchedGrazing_TypeIII
-    'PhytoLoss':     PhytoLinearLoss_recycled,
-    'ZooLoss':       ZooLinearLoss_recycled,
-    'PhytoSinking':  PhytoSinking_export,
-})
+# Slim output for parameter scans — state variables + the two flux targets
+# (PP, export) + the forcing parameters (Inflow__de needed by parscan_utils
+# to convert volumetric export to areal). Keeps parscan worker output small.
+SLIM_OUTPUT_VARS = {
+    'Nutrient__value',
+    'Phytoplankton__biomass',
+    'Zooplankton__biomass',
+    'Growth__uptake_value',
+    'PhytoSinking__sinking_value',
+    'Inflow__FN',
+    'Inflow__de',
+}
 
 
 # =============================================================================
-# SETUP — baseline IVP at FN_DEFAULT (Cariaco 'all'-regime mean)
-# =============================================================================
-# =============================================================================
-# FISH VARIANT — simplified-fish power-law via existing FishGrazing_Kernel
+# FISH VARIANT — simplified power-law kernel via existing FishGrazing_Kernel
 # =============================================================================
 # Reuses cariaco_ssm_comps.FishGrazing_Kernel (validated MS3-as-built component)
 # with custom kernel arrays:
@@ -156,7 +163,6 @@ model_baseline = xso.create({
 # Defaults chosen so fish_rate * fish_biomass * kernel_Z_max = 0.05 d-1 at the
 # largest Z class — comparable to background Δ = 0.025 d-1, doubling per-capita
 # loss on the top Z and creating a visible Micro-release signal.
-
 FISH_E_F        = 1.5        # power-law exponent on Z kernel
 FISH_RATE       = 0.05       # peak fish grazing rate per unit fish biomass [d-1]
 FISH_BIOMASS    = 1.0        # constant fish forcing (dimensionless, MS3 convention)
@@ -165,129 +171,148 @@ kernel_Z_fish = (zoo_esd / zoo_esd.max()) ** FISH_E_F     # peak=1 at largest
 kernel_P_fish = np.zeros(N_CLASSES)                        # no direct P grazing
 
 
-model_baseline_fish = xso.create({
+# =============================================================================
+# MODELS — Option A: Taniguchi M1 biology + Stock supply + phyto sinking
+# =============================================================================
+# Type II and Type III differ only in the Grazing component class; every other
+# component (and every input slot) is identical, so they share one input_vars
+# dict below. To add fish, use model_baseline_fish.
+model_baseline = xso.create({
     'Nutrient':      Nutrient,
     'Phytoplankton': PhytoSizeSpectrum,
     'Zooplankton':   ZooSizeSpectrum,
-    'Supply':        StockNutrientSupply,
+    'Inflow':        StockNutrientSupply,
     'Growth':        MonodGrowth_NP,
-    'Grazing':       MatchedGrazing_TypeII,     # swap to MatchedGrazing_TypeIII
+    'Grazing':       MatchedGrazing_TypeII,
     'PhytoLoss':     PhytoLinearLoss_recycled,
     'ZooLoss':       ZooLinearLoss_recycled,
     'PhytoSinking':  PhytoSinking_export,
-    'FishForcing':   ConstantFishForcing,        # NEW
-    'FishGrazing':   FishGrazing_Kernel,         # NEW
 })
 
-
-# =============================================================================
-# SETUP — baseline IVP at FN_DEFAULT (Cariaco 'all'-regime mean)
-# =============================================================================
-model_setup_baseline = xso.setup(
-    solver='solve_ivp', model=model_baseline,
-    time=ivp_time_array,
-    input_vars={
-        'Nutrient':      {'value_label': 'N', 'value_init': N_INIT},
-        'Phytoplankton': {'biomass_label': 'P', 'biomass_init': phyto_init,
-                          'phyto_esd_index': phyto_esd.tolist(),
-                          'phyto_esd_label': 'phyto_esd'},
-        'Zooplankton':   {'biomass_label': 'Z', 'biomass_init': zoo_init,
-                          'zoo_esd_index': zoo_esd.tolist(),
-                          'zoo_esd_label': 'zoo_esd'},
-        'Supply':        {'var': 'N', 'FN': FN_DEFAULT, 'de': DE_DEFAULT},
-        'Growth':        {'resource': 'N', 'consumer': 'P',
-                          'mu_max': mu_max_arr, 'halfsat': ks_arr},
-        'Grazing':       {'phyto': 'P', 'zoo': 'Z', 'nutrient': 'N',
-                          'Imax': Imax_arr, 'KsZ': KsZ_arr,
-                          'gamma': GAMMA_VAL},
-        'PhytoLoss':     {'population': 'P', 'nutrient': 'N',
-                          'rate': lambda_arr},
-        'ZooLoss':       {'population': 'Z', 'nutrient': 'N',
-                          'rate': delta_arr},
-        'PhytoSinking':  {'population': 'P', 'w_over_de': W_OVER_DE},
-    },
-    solver_kwargs=IVP_SOLVER_KWARGS,
-)
-
-
-# =============================================================================
-# SETUP — fish-variant IVP at FN_DEFAULT
-# =============================================================================
-model_setup_baseline_fish = xso.setup(
-    solver='solve_ivp', model=model_baseline_fish,
-    time=ivp_time_array,
-    input_vars={
-        'Nutrient':      {'value_label': 'N', 'value_init': N_INIT},
-        'Phytoplankton': {'biomass_label': 'P', 'biomass_init': phyto_init,
-                          'phyto_esd_index': phyto_esd.tolist(),
-                          'phyto_esd_label': 'phyto_esd'},
-        'Zooplankton':   {'biomass_label': 'Z', 'biomass_init': zoo_init,
-                          'zoo_esd_index': zoo_esd.tolist(),
-                          'zoo_esd_label': 'zoo_esd'},
-        'Supply':        {'var': 'N', 'FN': FN_DEFAULT, 'de': DE_DEFAULT},
-        'Growth':        {'resource': 'N', 'consumer': 'P',
-                          'mu_max': mu_max_arr, 'halfsat': ks_arr},
-        'Grazing':       {'phyto': 'P', 'zoo': 'Z', 'nutrient': 'N',
-                          'Imax': Imax_arr, 'KsZ': KsZ_arr,
-                          'gamma': GAMMA_VAL},
-        'PhytoLoss':     {'population': 'P', 'nutrient': 'N',
-                          'rate': lambda_arr},
-        'ZooLoss':       {'population': 'Z', 'nutrient': 'N',
-                          'rate': delta_arr},
-        'PhytoSinking':  {'population': 'P', 'w_over_de': W_OVER_DE},
-        'FishForcing':   {'forcing_label': 'F_forcing', 'value': FISH_BIOMASS},
-        'FishGrazing':   {'phyto': 'P', 'zoo': 'Z',
-                          'fish_forcing': 'F_forcing',
-                          'kernel_P': kernel_P_fish,
-                          'kernel_Z': kernel_Z_fish,
-                          'rate': FISH_RATE},
-    },
-    solver_kwargs=IVP_SOLVER_KWARGS,
-)
-
-
-# =============================================================================
-# TYPE III VARIANT — Option A baseline with Holling Type III matched grazing
-# =============================================================================
-# Identical to model_baseline / model_setup_baseline in every respect EXCEPT the
-# grazing functional response (MatchedGrazing_TypeIII: low-prey refuge, G ∝ P²
-# at low prey). Rohr 2022 (Survey §7): Type III far more stable than Type II
-# (1.7% vs 37.5% of cases unstable). Same input_vars slots (Imax, KsZ, gamma) —
-# no other change. Built for the Type II vs Type III stability assessment.
 model_baseline_t3 = xso.create({
     'Nutrient':      Nutrient,
     'Phytoplankton': PhytoSizeSpectrum,
     'Zooplankton':   ZooSizeSpectrum,
-    'Supply':        StockNutrientSupply,
+    'Inflow':        StockNutrientSupply,
     'Growth':        MonodGrowth_NP,
-    'Grazing':       MatchedGrazing_TypeIII,
+    'Grazing':       MatchedGrazing_TypeIII,     # low-prey refuge (Rohr 2022)
     'PhytoLoss':     PhytoLinearLoss_recycled,
     'ZooLoss':       ZooLinearLoss_recycled,
     'PhytoSinking':  PhytoSinking_export,
 })
 
+model_baseline_fish = xso.create({
+    'Nutrient':      Nutrient,
+    'Phytoplankton': PhytoSizeSpectrum,
+    'Zooplankton':   ZooSizeSpectrum,
+    'Inflow':        StockNutrientSupply,
+    'Growth':        MonodGrowth_NP,
+    'Grazing':       MatchedGrazing_TypeII,
+    'PhytoLoss':     PhytoLinearLoss_recycled,
+    'ZooLoss':       ZooLinearLoss_recycled,
+    'PhytoSinking':  PhytoSinking_export,
+    'FishForcing':   ConstantFishForcing,
+    'FishGrazing':   FishGrazing_Kernel,
+})
+
+
+# =============================================================================
+# SHARED INPUT_VARS
+# =============================================================================
+# One dict serves Type II and Type III (same component labels and slots; only
+# the Grazing class differs between the two models). Spelled out in full here;
+# the variant setups below reuse it rather than re-listing every slot.
+#
+# Forcing wiring:
+#   Inflow.de is broadcast under the label 'de' (slots de_label + de);
+#   PhytoSinking.de foreign-references that label ('de'). Overriding the value
+#   slot 'Inflow__de' (e.g. via the regime forcing dict) drives both supply
+#   and sinking — nothing else to touch.
+baseline_input_vars = {
+    'Nutrient':      {'value_label': 'N', 'value_init': N_INIT},
+    'Phytoplankton': {'biomass_label': 'P', 'biomass_init': phyto_init,
+                      'phyto_esd_index': phyto_esd.tolist(),
+                      'phyto_esd_label': 'phyto_esd'},
+    'Zooplankton':   {'biomass_label': 'Z', 'biomass_init': zoo_init,
+                      'zoo_esd_index': zoo_esd.tolist(),
+                      'zoo_esd_label': 'zoo_esd'},
+    'Inflow':        {'var': 'N', 'FN': FN_DEFAULT,
+                      'de': DE_DEFAULT, 'de_label': 'de'},
+    'Growth':        {'resource': 'N', 'consumer': 'P',
+                      'mu_max': mu_max_arr, 'halfsat': ks_arr},
+    'Grazing':       {'phyto': 'P', 'zoo': 'Z', 'nutrient': 'N',
+                      'Imax': Imax_arr, 'KsZ': KsZ_arr,
+                      'gamma': GAMMA_VAL},
+    'PhytoLoss':     {'population': 'P', 'nutrient': 'N',
+                      'rate': lambda_arr},
+    'ZooLoss':       {'population': 'Z', 'nutrient': 'N',
+                      'rate': delta_arr},
+    'PhytoSinking':  {'population': 'P', 'w_sink': W_SINK, 'de': 'de'},
+}
+
+# Fish variant = baseline slots + the two fish components.
+fish_input_vars = {
+    **baseline_input_vars,
+    'FishForcing':   {'forcing_label': 'F_forcing', 'value': FISH_BIOMASS},
+    'FishGrazing':   {'phyto': 'P', 'zoo': 'Z',
+                      'fish_forcing': 'F_forcing',
+                      'kernel_P': kernel_P_fish,
+                      'kernel_Z': kernel_Z_fish,
+                      'rate': FISH_RATE},
+}
+
+
+# =============================================================================
+# SETUPS — Type II (baseline)
+# =============================================================================
+# Full-output IVP — single diagnostic runs (full per-class P/Z time series).
+model_setup_baseline = xso.setup(
+    solver='solve_ivp', model=model_baseline, time=ivp_time_array,
+    input_vars=baseline_input_vars,
+    solver_kwargs=IVP_SOLVER_KWARGS,
+)
+
+# Slim-output IVP — parameter scans (run_xso_parscan + avg_tail).
+model_setup_baseline_slim = xso.setup(
+    solver='solve_ivp', model=model_baseline, time=ivp_time_array,
+    input_vars=baseline_input_vars, output_vars=SLIM_OUTPUT_VARS,
+    solver_kwargs=IVP_SOLVER_KWARGS,
+)
+
+# Stability — fsolve steady state + Jacobian eigenvalues (run_xso_stabilityscan,
+# seeded from an IVP tail-mean via parscan_utils.extract_steady_state_seed).
+model_setup_baseline_stability = xso.setup(
+    solver='stability', model=model_baseline, time=STAB_TIME,
+    input_vars=baseline_input_vars,
+)
+
+
+# =============================================================================
+# SETUPS — Type III (low-prey refuge variant)
+# =============================================================================
 model_setup_baseline_t3 = xso.setup(
-    solver='solve_ivp', model=model_baseline_t3,
-    time=ivp_time_array,
-    input_vars={
-        'Nutrient':      {'value_label': 'N', 'value_init': N_INIT},
-        'Phytoplankton': {'biomass_label': 'P', 'biomass_init': phyto_init,
-                          'phyto_esd_index': phyto_esd.tolist(),
-                          'phyto_esd_label': 'phyto_esd'},
-        'Zooplankton':   {'biomass_label': 'Z', 'biomass_init': zoo_init,
-                          'zoo_esd_index': zoo_esd.tolist(),
-                          'zoo_esd_label': 'zoo_esd'},
-        'Supply':        {'var': 'N', 'FN': FN_DEFAULT, 'de': DE_DEFAULT},
-        'Growth':        {'resource': 'N', 'consumer': 'P',
-                          'mu_max': mu_max_arr, 'halfsat': ks_arr},
-        'Grazing':       {'phyto': 'P', 'zoo': 'Z', 'nutrient': 'N',
-                          'Imax': Imax_arr, 'KsZ': KsZ_arr,
-                          'gamma': GAMMA_VAL},
-        'PhytoLoss':     {'population': 'P', 'nutrient': 'N',
-                          'rate': lambda_arr},
-        'ZooLoss':       {'population': 'Z', 'nutrient': 'N',
-                          'rate': delta_arr},
-        'PhytoSinking':  {'population': 'P', 'w_over_de': W_OVER_DE},
-    },
+    solver='solve_ivp', model=model_baseline_t3, time=ivp_time_array,
+    input_vars=baseline_input_vars,
+    solver_kwargs=IVP_SOLVER_KWARGS,
+)
+
+model_setup_baseline_t3_slim = xso.setup(
+    solver='solve_ivp', model=model_baseline_t3, time=ivp_time_array,
+    input_vars=baseline_input_vars, output_vars=SLIM_OUTPUT_VARS,
+    solver_kwargs=IVP_SOLVER_KWARGS,
+)
+
+model_setup_baseline_t3_stability = xso.setup(
+    solver='stability', model=model_baseline_t3, time=STAB_TIME,
+    input_vars=baseline_input_vars,
+)
+
+
+# =============================================================================
+# SETUP — fish variant (IVP only; slim/stability added when fish is in scope)
+# =============================================================================
+model_setup_baseline_fish = xso.setup(
+    solver='solve_ivp', model=model_baseline_fish, time=ivp_time_array,
+    input_vars=fish_input_vars,
     solver_kwargs=IVP_SOLVER_KWARGS,
 )
