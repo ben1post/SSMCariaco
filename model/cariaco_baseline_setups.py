@@ -72,6 +72,8 @@ from cariaco_baseline_comps import (
     ZooQuadraticLoss_recycled,
     # Temperature (Cloern 2018 Q10 on growth + grazing) — folded into R0 (2026-06-06).
     ConstantTemperatureForcing, MonodGrowth_T, DistributedGrazing_TypeIII_T,
+    # Diatom growth boost (piecewise mu_max branch) — 2026-06-08.
+    MonodGrowth_Diatom_T,
 )
 
 # Fish-variant reuses the MS3-as-built kernel component for one-way fish
@@ -131,7 +133,11 @@ Imax_arr   = 26.0  * zoo_esd   ** (-0.48)   # Stock/Hansen/Ward/Mattern e_g=-0.4
 # allometric form collapses Type III (small-prey predators sit permanently in
 # the S²-refuge; see Baseline Construction Options.md §5). Value in the
 # literature window 0.15-0.5 mmol N m-3 (≈ Dutkiewicz 2015a); calibrate per obs.
-KSZ_UNIFORM = 0.5
+KSZ_UNIFORM = 0.3   # temperature-inclusive obs-fit (2026-06-06): a single uniform
+                    # K_sZ≈0.3 fits BOTH regimes' mean cell size within ~15% at the
+                    # observed F_N (upwelling 4.7/obs 5.5, relaxed 2.3/obs 2.0 µm),
+                    # stable (CV≤0.008). In the Rohr/Dutkiewicz window. (No-temp fit
+                    # was 0.25; temperature enlarges cells → slightly higher K_sZ.)
 KsZ_arr     = np.full(N_CLASSES, KSZ_UNIFORM)   # (was 17.92·z^-0.64 allometric)
 
 DELTA_VAL  = 0.025          # zoo Δ [d-1] linear closure — matched reference models only
@@ -545,3 +551,193 @@ model_setup_dist_herb_t3_T_slim      = _distT_slim(phiPZ_herb)
 model_setup_dist_herb_t3_T_stability = _distT_stab(phiPZ_herb)
 model_setup_dist_omni_t3_T_slim      = _distT_slim(phiPZ_omni)
 model_setup_dist_omni_t3_T_stability = _distT_stab(phiPZ_omni)
+
+
+# =============================================================================
+# DIATOM GROWTH BOOST — piecewise ('diatom') mu_max branch on the T-aware R0
+# =============================================================================
+# 2026-06-08: fish grazing is structurally inert in herbivory R0 because the
+# 2-level web can't sustain large Z (no large-P stock to feed them). The lever
+# is a diatom GROWTH boost, not grazing-defence: a flatter mu_max branch above
+# a size threshold builds a standing large-P stock -> seeds large Z (cascade
+# prerequisite). Swaps Growth -> MonodGrowth_Diatom_T; everything else is R0.
+# diatom_exp / diatom_thresh are scalar params -> parscan-able. K_s and m_P stay
+# on the base allometry (affinity penalty preserved; m_P-coupling caveat noted
+# in the component docstring). diatom_exp == BASE_EXP reproduces R0 exactly.
+MU0_VAL               = 2.6      # mu_max prefactor (Tang 1995 / Banas 2011)
+BASE_EXP              = -0.45    # small-cell mu_max exponent (R0)
+DIATOM_EXP_DEFAULT    = -0.45    # default == BASE_EXP -> recovers R0
+DIATOM_THRESH_DEFAULT = 20.0     # crossover ESD [µm] (Nano/Micro boundary)
+
+model_dist_t3_T_diatom = xso.create({
+    'Nutrient':      Nutrient,
+    'Phytoplankton': PhytoSizeSpectrum,
+    'Zooplankton':   ZooSizeSpectrum,
+    'Inflow':        StockNutrientSupply,
+    'Temperature':   ConstantTemperatureForcing,
+    'Growth':        MonodGrowth_Diatom_T,
+    'Grazing':       DistributedGrazing_TypeIII_T,
+    'GrazingRouter': DistributedGrazingRouter,
+    'PhytoLoss':     PhytoLinearLoss_recycled,
+    'ZooLoss':       ZooQuadraticLoss_recycled,
+    'PhytoSinking':  PhytoSinking_export,
+})
+
+
+def make_dist_T_diatom_input_vars(phiPZ, diatom_exp=DIATOM_EXP_DEFAULT,
+                                  diatom_thresh=DIATOM_THRESH_DEFAULT):
+    """T-aware input_vars with the piecewise-diatom Growth block. Fully REPLACES
+    the Growth entry (the new component takes esd/mu0/base_exp/diatom_* instead
+    of the precomputed mu_max array); all other blocks are the R0-T defaults."""
+    iv = make_dist_T_input_vars(phiPZ)
+    iv['Growth'] = {'resource': 'N', 'consumer': 'P', 'temperature': 'temperature',
+                    'esd': phyto_esd, 'mu0': MU0_VAL, 'base_exp': BASE_EXP,
+                    'diatom_exp': diatom_exp, 'diatom_thresh': diatom_thresh,
+                    'halfsat': ks_arr, 'q10': Q10_GROW, 't_ref': T_REF}
+    return iv
+
+
+def _distT_diatom_slim(phiPZ, diatom_exp=DIATOM_EXP_DEFAULT,
+                       diatom_thresh=DIATOM_THRESH_DEFAULT):
+    return xso.setup(solver='solve_ivp', model=model_dist_t3_T_diatom, time=ivp_time_array,
+                     input_vars=make_dist_T_diatom_input_vars(phiPZ, diatom_exp, diatom_thresh),
+                     output_vars=SLIM_OUTPUT_VARS, solver_kwargs=IVP_SOLVER_KWARGS)
+
+def _distT_diatom_stab(phiPZ, diatom_exp=DIATOM_EXP_DEFAULT,
+                       diatom_thresh=DIATOM_THRESH_DEFAULT):
+    return xso.setup(solver='stability', model=model_dist_t3_T_diatom, time=STAB_TIME,
+                     input_vars=make_dist_T_diatom_input_vars(phiPZ, diatom_exp, diatom_thresh))
+
+# Diatom-boost herb setups (defaults reproduce R0; scan overrides Growth__diatom_*)
+model_setup_dist_herb_t3_T_diatom_slim      = _distT_diatom_slim(phiPZ_herb)
+model_setup_dist_herb_t3_T_diatom_stability = _distT_diatom_stab(phiPZ_herb)
+
+
+# =============================================================================
+# FISH (R0 + Rykaczewski sardine kernel) — first top-down layered addition
+# =============================================================================
+# Full Rykaczewski (2019) two-sigmoid sardine clearance-rate curve, evaluated on
+# BOTH grids and jointly peak-normalised (= cariaco_ssm_setup, MS3-as-built). Zoo
+# ESD passed directly (no prosome ×2.5), no filter-feeding clamp — exactly the
+# original calls. Fish biomass F prescribed constant; one-way export (catch).
+# Mechanism: kernel peaks ~1230 µm → crops large Z → releases the large P those Z
+# grazed → candidate Nano→Micro carve via the cascade.
+
+def clearance_rate_sardine_vdl(prey_length_um, filter_feeding=False):
+    """Sardine size-specific clearance rate, Rykaczewski (2019) Eq. 3 (two-sigmoid)."""
+    x = np.asarray(prey_length_um, dtype=float)
+    def _f(xv):
+        e1 = np.exp(0.0198 * (xv - 15.0))
+        term1 = (9.03 * e1) / (12.03 + 0.75 * e1)
+        e2 = np.exp(0.00843 * (xv - 800.0))
+        term2 = (9.96 * e2) / (30.8 + 0.323 * e2)
+        return term1 + term2
+    F_S = _f(x)
+    if filter_feeding:
+        F_S = np.where(x > 1230.0, _f(np.array(1230.0)), F_S)
+    return F_S
+
+def compute_fish_kernel_vdl_joint(phyto_esd, zoo_esd):
+    """Rykaczewski clearance on P and Z grids, JOINTLY peak-normalised (peak=1
+    on whichever grid holds the curve maximum — typically the large-zoo end)."""
+    F_P = clearance_rate_sardine_vdl(phyto_esd)
+    F_Z = clearance_rate_sardine_vdl(zoo_esd)
+    F_max = max(F_P.max(), F_Z.max())
+    return F_P / F_max, F_Z / F_max
+
+FISH_BIOMASS = 1.0      # prescribed constant fish biomass (MS3-as-built)
+FISH_RATE    = 0.005    # peak fish grazing rate per unit fish biomass [d-1] (MS3-as-built)
+kernel_P_fish, kernel_Z_fish = compute_fish_kernel_vdl_joint(phyto_esd, zoo_esd)
+
+model_dist_t3_T_fish = xso.create({
+    'Nutrient':      Nutrient,
+    'Phytoplankton': PhytoSizeSpectrum,
+    'Zooplankton':   ZooSizeSpectrum,
+    'Inflow':        StockNutrientSupply,
+    'Temperature':   ConstantTemperatureForcing,
+    'Growth':        MonodGrowth_T,
+    'Grazing':       DistributedGrazing_TypeIII_T,
+    'GrazingRouter': DistributedGrazingRouter,
+    'PhytoLoss':     PhytoLinearLoss_recycled,
+    'ZooLoss':       ZooQuadraticLoss_recycled,
+    'PhytoSinking':  PhytoSinking_export,
+    'FishForcing':   ConstantFishForcing,
+    'FishGrazing':   FishGrazing_Kernel,
+})
+
+
+def make_dist_T_fish_input_vars(phiPZ):
+    """Temperature-aware R0 input_vars + the Rykaczewski fish kernel."""
+    iv = make_dist_T_input_vars(phiPZ)
+    iv['FishForcing'] = {'forcing_label': 'F_forcing', 'value': FISH_BIOMASS}
+    iv['FishGrazing'] = {'phyto': 'P', 'zoo': 'Z', 'fish_forcing': 'F_forcing',
+                         'kernel_P': kernel_P_fish, 'kernel_Z': kernel_Z_fish,
+                         'rate': FISH_RATE}
+    return iv
+
+
+def _distTf_slim(phiPZ):
+    return xso.setup(solver='solve_ivp', model=model_dist_t3_T_fish, time=ivp_time_array,
+                     input_vars=make_dist_T_fish_input_vars(phiPZ),
+                     output_vars=SLIM_OUTPUT_VARS, solver_kwargs=IVP_SOLVER_KWARGS)
+
+def _distTf_stab(phiPZ):
+    return xso.setup(solver='stability', model=model_dist_t3_T_fish, time=STAB_TIME,
+                     input_vars=make_dist_T_fish_input_vars(phiPZ))
+
+model_setup_dist_herb_t3_T_fish_slim      = _distTf_slim(phiPZ_herb)
+model_setup_dist_herb_t3_T_fish_stability = _distTf_stab(phiPZ_herb)
+model_setup_dist_omni_t3_T_fish_slim      = _distTf_slim(phiPZ_omni)
+model_setup_dist_omni_t3_T_fish_stability = _distTf_stab(phiPZ_omni)
+
+
+# =============================================================================
+# DIATOM GROWTH BOOST + FISH — the construct for the F_N x fish crosswise
+# =============================================================================
+# 2026-06-08: the diatom boost (MonodGrowth_Diatom_T) seeds a stable large-Z
+# population at bloom F_N (z95 ~985 µm, fZ>200 ~0.3), closing the size-scale gap
+# that made fish inert in R0. This variant = diatom-boost Growth + the same
+# Rykaczewski kernel, so the F_N x fish crosswise (the core MS3 experiment) runs
+# on a stable, large-Z-bearing state. diatom_exp / diatom_thresh and the fish
+# rate are all scalar params -> parscan-able.
+
+model_dist_t3_T_diatom_fish = xso.create({
+    'Nutrient':      Nutrient,
+    'Phytoplankton': PhytoSizeSpectrum,
+    'Zooplankton':   ZooSizeSpectrum,
+    'Inflow':        StockNutrientSupply,
+    'Temperature':   ConstantTemperatureForcing,
+    'Growth':        MonodGrowth_Diatom_T,
+    'Grazing':       DistributedGrazing_TypeIII_T,
+    'GrazingRouter': DistributedGrazingRouter,
+    'PhytoLoss':     PhytoLinearLoss_recycled,
+    'ZooLoss':       ZooQuadraticLoss_recycled,
+    'PhytoSinking':  PhytoSinking_export,
+    'FishForcing':   ConstantFishForcing,
+    'FishGrazing':   FishGrazing_Kernel,
+})
+
+
+def make_dist_T_diatom_fish_input_vars(phiPZ, diatom_exp=DIATOM_EXP_DEFAULT,
+                                       diatom_thresh=DIATOM_THRESH_DEFAULT):
+    """Diatom-boost Growth block (from make_dist_T_diatom_input_vars) + the
+    Rykaczewski fish kernel (from make_dist_T_fish_input_vars)."""
+    iv = make_dist_T_diatom_input_vars(phiPZ, diatom_exp, diatom_thresh)
+    iv['FishForcing'] = {'forcing_label': 'F_forcing', 'value': FISH_BIOMASS}
+    iv['FishGrazing'] = {'phyto': 'P', 'zoo': 'Z', 'fish_forcing': 'F_forcing',
+                         'kernel_P': kernel_P_fish, 'kernel_Z': kernel_Z_fish,
+                         'rate': FISH_RATE}
+    return iv
+
+
+def _distTdf_slim(phiPZ, diatom_exp=DIATOM_EXP_DEFAULT, diatom_thresh=DIATOM_THRESH_DEFAULT):
+    return xso.setup(solver='solve_ivp', model=model_dist_t3_T_diatom_fish, time=ivp_time_array,
+                     input_vars=make_dist_T_diatom_fish_input_vars(phiPZ, diatom_exp, diatom_thresh),
+                     output_vars=SLIM_OUTPUT_VARS, solver_kwargs=IVP_SOLVER_KWARGS)
+
+def _distTdf_stab(phiPZ, diatom_exp=DIATOM_EXP_DEFAULT, diatom_thresh=DIATOM_THRESH_DEFAULT):
+    return xso.setup(solver='stability', model=model_dist_t3_T_diatom_fish, time=STAB_TIME,
+                     input_vars=make_dist_T_diatom_fish_input_vars(phiPZ, diatom_exp, diatom_thresh))
+
+model_setup_dist_herb_t3_T_diatom_fish_slim      = _distTdf_slim(phiPZ_herb)
+model_setup_dist_herb_t3_T_diatom_fish_stability = _distTdf_stab(phiPZ_herb)

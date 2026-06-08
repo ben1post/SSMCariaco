@@ -583,6 +583,57 @@ class MonodGrowth_T:
 
 
 @xso.component
+class MonodGrowth_Diatom_T:
+    """MonodGrowth_T with a piecewise ('diatom') mu_max allometry that flattens
+    above a size threshold, built INTERNALLY from scalar params.
+
+        mu(s) = mu0 * s^base_exp                                  for s <  s_thresh
+        mu(s) = mu0 * s_thresh^base_exp * (s/s_thresh)^diatom_exp for s >= s_thresh
+
+    Continuous at s_thresh (no jump). diatom_exp == base_exp recovers the
+    single-branch R0 allometry exactly (built-in regression check). diatom_exp
+    -> 0 flattens mu above the threshold; diatom_exp > 0 makes large ('diatom')
+    cells grow FASTER with size, seeding a standing large-P stock -- the
+    large-P -> large-Z cascade prerequisite (MS3 2026-06-08; cf. Mattern et al.
+    2014/2026 diatom functional type = elevated mu_max coupled to a low nutrient
+    affinity). K_s is NOT modified here: it stays on the single Ward (2012)
+    k_s = 0.144*s^0.81 branch (passed as `halfsat`), so the affinity penalty
+    still gates the boosted large cells to high nutrient and preserves the
+    upwelling<->relaxed regime contrast.
+
+    diatom_exp and diatom_thresh are SCALAR params -> directly parscan-able
+    (Growth__diatom_exp / Growth__diatom_thresh). m_P (PhytoLinearLoss `rate`)
+    is unchanged and still keyed to the BASE allometry array -- a deliberate
+    first-pass simplification (the Banas m_P = 0.1*mu_max coupling is therefore
+    broken for boosted cells; see scan-cell note).
+    """
+    resource = xso.variable(foreign=True, flux='uptake', negative=True,
+                            description='dissolved nitrogen (scalar sink)')
+    consumer = xso.variable(foreign=True, dims='phyto', flux='uptake',
+                            negative=False, description='phyto (per-class source)')
+    temperature = xso.forcing(foreign=True, description='box temperature [°C]')
+    esd = xso.parameter(dims='phyto', description='phyto ESD per class [µm]')
+    mu0 = xso.parameter(description='mu_max prefactor [d-1] (Tang/Banas: 2.6)')
+    base_exp = xso.parameter(description='small-cell mu_max exponent (-0.45)')
+    diatom_exp = xso.parameter(description='large-cell (diatom) mu_max exponent; '
+                               '== base_exp recovers R0')
+    diatom_thresh = xso.parameter(description='crossover ESD [µm] for the diatom branch')
+    halfsat = xso.parameter(dims='phyto', description='nutrient half-sat per class')
+    q10 = xso.parameter(description='growth Q10 (Cloern 2018: 1.62)')
+    t_ref = xso.parameter(description='reference temperature [°C] (20)')
+
+    @xso.flux(dims='phyto')
+    def uptake(self, resource, consumer, temperature, esd, mu0, base_exp,
+               diatom_exp, diatom_thresh, halfsat, q10, t_ref):
+        s = np.asarray(esd, dtype=float)
+        mu_base   = mu0 * s ** base_exp
+        mu_diatom = mu0 * diatom_thresh ** base_exp * (s / diatom_thresh) ** diatom_exp
+        mu = np.where(s < diatom_thresh, mu_base, mu_diatom)
+        f_T = q10 ** ((temperature - t_ref) / 10.0)
+        return f_T * mu * resource * consumer / (resource + halfsat)
+
+
+@xso.component
 class DistributedGrazing_TypeIII_T:
     """DistributedGrazing_TypeIII with Q10 temperature scaling on I_max.
 
