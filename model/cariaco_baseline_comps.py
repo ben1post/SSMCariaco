@@ -338,3 +338,199 @@ class PhytoSinking_export:
     @xso.flux(dims='phyto')
     def sinking(self, population, w_sink, de):
         return (w_sink / de) * population
+
+
+# =============================================================================
+# DISTRIBUTED (KERNEL) GRAZING — group-flux family, per-class Imax AND KsZ
+# =============================================================================
+# Layered deviation beyond the matched single-prey baseline above. Unlike
+# MatchedGrazing_TypeII/III (1:1 predator-prey, delta kernel), these spread
+# each predator's feeding over a size window via the phiPZ preference matrix
+# (Survey §9), so prey availability S_j is a resolution-invariant integral
+# rather than a single ~1/N bin. The structural variant is set ENTIRELY by
+# which phiPZ is passed (compute_grazing_kernel mode):
+#   'matched' — delta on the P-block diagonal (reproduces MatchedGrazing as a
+#               cross-check, given zoo_esd = theta_opt * phyto_esd)
+#   'herb'    — log-normal kernel on P prey only (Taniguchi Model 2 analogue)
+#   'omni'    — log-normal kernel on P+Z prey (Taniguchi Model 3 / MS3-as-built)
+#
+# CRITICAL: both Imax and KsZ are dims='zoo' per-class arrays here, so the
+# grazing allometry (e_g on Imax, e_kz on KsZ — the Poulin-Franks/Taniguchi
+# slope levers, Survey §18) is always explicit and a scalar regression is
+# structurally impossible. Pass np.full(n_zoo, x) in the setup for a uniform
+# value; pass an allometry for a size-dependent one. The choice is never hidden.
+#
+# Group-flux routing (XSO_HANDOFF §8.1, §16): the matrix component publishes
+# the (n_P+n_Z, n_Z) grazing matrix to the 'graze_matrix' group; the router
+# reads it and distributes per-prey loss / per-predator gain / N recycle.
+
+def compute_grazing_kernel(phyto_esd, zoo_esd, mode='omni',
+                           theta_opt=10.0, sigma_log=0.25):
+    """Feeding-preference matrix phiPZ of shape (n_P + n_Z, n_Z).
+
+    mode : {'matched', 'herb', 'omni'}
+        'matched' — delta on the P-block diagonal (Taniguchi M1 structure;
+                    with zoo_esd = theta_opt * phyto_esd the peak lands on
+                    the matched class, so this is a true 1:1 delta).
+        'herb'    — log-normal kernel on P prey only (Z-block zero).
+        'omni'    — log-normal kernel on P+Z prey, Z-on-self diagonal zeroed
+                    (no within-class cannibalism).
+    sigma_log is the kernel width in log10(ESD) space, 2*sigma**2 convention
+    (Survey §9; MS3 default sigma_log=0.25). theta_opt is the predator:prey
+    ESD ratio (kernel peak; Survey §9, MS3 default 10).
+    """
+    phyto_esd = np.asarray(phyto_esd)
+    zoo_esd = np.asarray(zoo_esd)
+    n_P, n_Z = len(phyto_esd), len(zoo_esd)
+    prey_esd = np.concatenate([phyto_esd, zoo_esd])
+    log_ratio = np.log10(zoo_esd[None, :] / prey_esd[:, None])
+    kernel = np.exp(-((log_ratio - np.log10(theta_opt)) ** 2) / (2 * sigma_log ** 2))
+    phiPZ = np.zeros((n_P + n_Z, n_Z))
+    if mode == 'matched':
+        for j in range(n_Z):
+            phiPZ[j, j] = 1.0
+    elif mode == 'herb':
+        phiPZ[:n_P, :] = kernel[:n_P, :]
+    elif mode == 'omni':
+        phiPZ[:] = kernel
+        for j in range(n_Z):
+            phiPZ[n_P + j, j] = 0.0
+    else:
+        raise ValueError(f"mode must be 'matched'/'herb'/'omni', got {mode!r}")
+    return phiPZ
+
+
+@xso.component
+class DistributedGrazing_TypeII:
+    """Distributed Holling Type II grazing (group-flux). Per-class Imax AND KsZ.
+
+        S_j  = Σ_k φ_kj · B_k                          (B = [P; Z])
+        G_kj = Imax_j · Z_j · φ_kj · B_k / (S_j + KsZ_j)
+
+    Publishes the (n_P+n_Z, n_Z) matrix to the 'graze_matrix' group; routed by
+    DistributedGrazingRouter. φ = phiPZ supplied from the setup (kernel mode).
+    """
+    resource = xso.variable(foreign=True, dims='phyto',
+                            description='phytoplankton biomass (prey)')
+    consumer = xso.variable(foreign=True, dims='zoo',
+                            description='zooplankton biomass (predator)')
+    phiPZ = xso.parameter(dims=('full', 'zoo'),
+                          description='feeding preference matrix (prey × predator)')
+    Imax = xso.parameter(dims='zoo',
+                         description='per-class max ingestion rate [d-1]')
+    KsZ = xso.parameter(dims='zoo',
+                        description='per-class grazing half-saturation [mmol N m-3]')
+
+    @xso.flux(group='graze_matrix', dims=('full', 'zoo'))
+    def grazing(self, resource, consumer, phiPZ, Imax, KsZ):
+        biomass = self.m.concatenate((resource, consumer))
+        S = self.m.sum(phiPZ * biomass[:, None], axis=0)
+        return Imax * consumer * phiPZ * biomass[:, None] / (S + KsZ)
+
+
+@xso.component
+class DistributedGrazing_TypeIII:
+    """Distributed Holling Type III grazing (group-flux). Per-class Imax AND KsZ.
+
+        G_kj = Imax_j · Z_j · φ_kj · B_k · S_j / (S_j² + KsZ_j²)
+
+    Low-prey refuge (G ∝ S² at S << KsZ; Rohr 2022, Survey §7). Same routing as
+    DistributedGrazing_TypeII via the shared 'graze_matrix' group.
+    """
+    resource = xso.variable(foreign=True, dims='phyto',
+                            description='phytoplankton biomass (prey)')
+    consumer = xso.variable(foreign=True, dims='zoo',
+                            description='zooplankton biomass (predator)')
+    phiPZ = xso.parameter(dims=('full', 'zoo'),
+                          description='feeding preference matrix (prey × predator)')
+    Imax = xso.parameter(dims='zoo',
+                         description='per-class max ingestion rate [d-1]')
+    KsZ = xso.parameter(dims='zoo',
+                        description='per-class grazing half-saturation [mmol N m-3]')
+
+    @xso.flux(group='graze_matrix', dims=('full', 'zoo'))
+    def grazing(self, resource, consumer, phiPZ, Imax, KsZ):
+        biomass = self.m.concatenate((resource, consumer))
+        S = self.m.sum(phiPZ * biomass[:, None], axis=0)
+        return Imax * consumer * phiPZ * biomass[:, None] * S / (S ** 2 + KsZ ** 2)
+
+
+@xso.component
+class DistributedGrazingRouter:
+    """Route the 'graze_matrix' group into per-prey loss (P and Z), per-predator
+    gain (× Γ), and the scalar (1−Γ) recycle to N (Taniguchi-style direct
+    recycle; no detritus). loss_Z is nonzero only for omnivorous phiPZ.
+
+    Mirrors the matched routing of MatchedGrazing_TypeII/III but for the
+    multi-prey kernel case. Consumer side of the group / group_to_arg idiom
+    (XSO_HANDOFF §8.1).
+    """
+    grazed_phyto = xso.variable(foreign=True, dims='phyto',
+                                flux='loss_P', negative=True,
+                                description='phytoplankton (per-class sink)')
+    grazed_zoo = xso.variable(foreign=True, dims='zoo',
+                              flux='loss_Z', negative=True,
+                              description='zooplankton-as-prey (per-class sink; '
+                                          'nonzero only for omnivorous phiPZ)')
+    assimilated_consumer = xso.variable(foreign=True, dims='zoo',
+                                        flux='gain_Z',
+                                        description='zooplankton (per-class source)')
+    excreted_nutrient = xso.variable(foreign=True,
+                                     flux='recycle_to_N',
+                                     description='nutrient (scalar source — '
+                                                 'sloppy-feeding (1−Γ) fraction)')
+    gamma = xso.parameter(description='Γ — gross growth efficiency (scalar)')
+
+    @xso.flux(dims='phyto', group_to_arg='graze_matrix')
+    def loss_P(self, grazed_phyto, graze_matrix, gamma):
+        per_prey_loss = self.m.sum(graze_matrix, axis=1)
+        return per_prey_loss[0:len(grazed_phyto)]
+
+    @xso.flux(dims='zoo', group_to_arg='graze_matrix')
+    def loss_Z(self, grazed_phyto, grazed_zoo, graze_matrix, gamma):
+        n_P = len(grazed_phyto)
+        per_prey_loss = self.m.sum(graze_matrix, axis=1)
+        return per_prey_loss[n_P:n_P + len(grazed_zoo)]
+
+    @xso.flux(dims='zoo', group_to_arg='graze_matrix')
+    def gain_Z(self, graze_matrix, gamma):
+        return self.m.sum(graze_matrix, axis=0) * gamma
+
+    @xso.flux(group_to_arg='graze_matrix')
+    def recycle_to_N(self, graze_matrix, gamma):
+        return (1.0 - gamma) * self.m.sum(graze_matrix)
+
+
+# =============================================================================
+# ZOOPLANKTON QUADRATIC CLOSURE — full recycle to N (Banas 2011 form, no D)
+# =============================================================================
+
+@xso.component
+class ZooQuadraticLoss_recycled:
+    """Distributed quadratic Z closure with full sum-recycle to N.
+
+        per-class Z sink:   m_Z · Z_j · Σ_k Z_k    (dims='zoo')
+        N recycling source: m_Z · (Σ_k Z_k)²       (scalar)
+
+    Banas 2011 closure form (Survey §11). m_Z is a quadratic coefficient
+    [(mmol N m-3)^-1 d-1] — scalar by definition, NOT a size allometry, so a
+    scalar here is correct (unlike the grazing Imax/KsZ). Routes 100 % to N
+    (Taniguchi-style; no detritus pool in this baseline). MS3 default m_Z=0.1.
+    """
+    population = xso.variable(foreign=True, dims='zoo',
+                              flux='mortality', negative=True,
+                              description='zooplankton (per-class sink)')
+    nutrient = xso.variable(foreign=True,
+                            flux='recycle_to_N', negative=False,
+                            description='nutrient (scalar source)')
+    rate = xso.parameter(description='m_Z quadratic closure coeff '
+                                     '[(mmol N m-3)^-1 d-1]')
+
+    @xso.flux(dims='zoo')
+    def mortality(self, population, rate):
+        return rate * population * self.m.sum(population)
+
+    @xso.flux
+    def recycle_to_N(self, population, rate):
+        total_Z = self.m.sum(population)
+        return rate * total_Z * total_Z

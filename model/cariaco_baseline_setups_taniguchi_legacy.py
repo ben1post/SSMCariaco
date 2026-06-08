@@ -1,15 +1,8 @@
 """
-Cariaco baseline NPZ model setups — MODERNISED 2026-06-06
-=========================================================
-Settled baseline construct (see `MS3 Project Background.md` 2026-06-06
-"BASELINE CONSTRUCT SETTLED" block and `Baseline Construction Options.md`):
-distributed Holling Type III grazing + distributed quadratic Z closure +
-Stock F_N/d_e supply + phyto sinking, no detritus, no fish. Allometries moved
-off Taniguchi-microzoo onto the coherent Banas (2011) / Ward (2012) /
-Mattern (2026) lineage.
-
-NOTE: the previous Taniguchi-verbatim setups file is kept under a separate
-name as a historical reference. This file is now the working baseline.
+Cariaco baseline NPZ model setups (Option A)
+============================================
+Iteration-1 setups for the MS3 manuscript baseline:
+Taniguchi 2014 Model 1 biology + Stock-style physical extensions.
 
 Builds the model from cariaco_baseline_comps and creates IVP, slim-IVP, and
 steady-state/stability setups for size-spectrum diagnostic runs and parameter
@@ -17,23 +10,23 @@ scans. F_N is the scan axis ('Inflow__FN'); the regime forcing dict returned by
 cariaco_obs.load_cariaco_targets ({'Inflow__FN', 'Inflow__de'}) drops straight
 in as fixed_overrides / input_vars_override.
 
-Settled parameter choices and their literature anchors (Survey §§3-11):
-- μ_max:        2.6·s^-0.45  (Tang 1995 / Banas 2011, monotonic)
-- K_s:          0.144·s^0.81 (Ward 2012 / Marañón 2013 × Aksnes-Egge 1991)
-- I_max:        26·s^-0.48   (Stock/Hansen/Ward/Mattern broad-span e_g)
-- K_sZ:         UNIFORM ≈0.5 (Hansen/Rohr/Mattern/Dutkiewicz; Type III REQUIRES
-                uniform K_sZ — Taniguchi allometric K_sZ collapses Type III)
-- m_P (phyto):  0.1·μ_max    (Banas 2011, size-dependent)
-- Z closure:    quadratic m_Z=0.1 (Banas 2011), recycled to N
-- GGE Γ:        0.25 (Stock; range 0.25-0.33)
-- Pred:prey r:  10 (θ_opt=10); kernel σ_log=0.25
-- Grazing:      distributed Type III (DistributedGrazing_TypeIII); matched
-                models retained as diagnostics (now on modern allometries)
-- Supply:       Stock 2008 Eq. 7: F_N/d_e ('Inflow') + phyto sinking w=5 m/d
-- No detritus, no fish kernel (baseline; fish = first layered addition)
-- Grid:         ≥40 phyto (0.2-200 µm) + zoo (10× phyto), log-spaced;
-                N_CLASSES via env-var MS3_N_CLASSES (default 40)
-- Obs-fit knobs (Baseline Construction Options.md §3): K_sZ, e_g, Γ
+Iteration-1 parameter choices and their literature anchors:
+- Allometries:  Taniguchi 2014 Table 1 verbatim (μ_max, k_s, I_max, K_sZ).
+                MS3-defensible alternative (Stock/Hansen cluster, K_sZ
+                uniform per Correction.md) flagged inline for swap.
+- GGE Γ:        0.25 (Stock central / MS3-as-built; settled in Correction.md
+                — scalar uniform per Hansen 1997 / Straile 1997)
+- Pred:prey r:  10 (MS3/Stock/Banas convention, Survey §9; θ_opt=10 settled)
+- Λ (phyto):    0.0015 d-1 (Taniguchi Table 1; tuned for Z:P, NOT for slope)
+- Δ (zoo):      0.025 d-1 (Taniguchi Table 1; tuned for Z:P, NOT for slope)
+- Grazing:      matched single-prey, Holling Type II (Taniguchi M1 verbatim)
+- Supply:       Stock 2008 Eq. 7: F_N/d_e (component label 'Inflow')
+- Sinking:      w_sink = 5 m/d; d_e is broadcast from Inflow and foreign-
+                referenced by PhytoSinking, so the export rate w_sink/d_e
+                follows the one regime depth without a w_over_de param.
+- No detritus, no fish kernel (iteration-1 baseline)
+- Grid:         12 phyto (0.5-200 µm) + 12 zoo (5-2000 µm), log-spaced
+                (MS3-as-built grid; Model Equations.md §1)
 
 Setups exposed at module scope (parscan contract — xso.parscans imports these
 by name): per model variant a full-output IVP setup (single diagnostic runs),
@@ -106,36 +99,22 @@ zoo_esd   = ZOO_PHYTO_RATIO * phyto_esd
 
 
 # =============================================================================
-# ALLOMETRIES — Banas (2011) / Ward (2012) / Mattern (2026) coherent lineage
-# (modernised 2026-06-06; Taniguchi-verbatim values kept in the renamed
-#  reference file. Sources: Survey §§3-6,8; Baseline Construction Options.md §2)
-# LEGACY-TANIGUCHI (reference only):
+# ALLOMETRIES — TANIGUCHI 2014 TABLE 1 VERBATIM
 # =============================================================================
 # Alternative for MS3-defensible mesozoo-inclusive grid (Survey §6/§8):
 #   Imax_arr = 26.0 * zoo_esd ** -0.48     # Stock/Hansen/Ward cluster
 #   KsZ_arr  = np.full(N_CLASSES, 3.0)     # Hansen 1997, Correction.md settled
 
-#   mu_max_arr = 1.36  * phyto_esd ** (-0.16)   # Taniguchi Eq. 7
-#   ks_arr     = 0.33  * phyto_esd ** ( 0.48)   # Taniguchi Eq. 8
-#   Imax_arr   = 33.96 * zoo_esd   ** (-0.66)   # Taniguchi Eq. 9
-#   KsZ_arr    = 17.92 * zoo_esd   ** (-0.64)   # Taniguchi Eq. 10
-#   lambda_arr = np.full(N_CLASSES, 0.0015)     # Taniguchi const Λ
+mu_max_arr = 1.36  * phyto_esd ** (-0.16)   # Taniguchi Eq. 7
+ks_arr     = 0.33  * phyto_esd ** ( 0.48)   # Taniguchi Eq. 8
+Imax_arr   = 33.96 * zoo_esd   ** (-0.66)   # Taniguchi Eq. 9
+KsZ_arr    = 17.92 * zoo_esd   ** (-0.64)   # Taniguchi Eq. 10
 
-mu_max_arr = 2.6   * phyto_esd ** (-0.45)   # Tang 1995 / Banas 2011 (was 1.36·s^-0.16)
-ks_arr     = 0.144 * phyto_esd ** ( 0.81)   # Ward 2012 / Marañón×Aksnes-Egge (was 0.33·s^0.48)
-Imax_arr   = 26.0  * zoo_esd   ** (-0.48)   # Stock/Hansen/Ward/Mattern e_g=-0.48 (was 33.96·z^-0.66)
+LAMBDA_VAL = 0.0015         # phyto Λ [d-1], Taniguchi Table 1
+DELTA_VAL  = 0.025          # zoo Δ   [d-1], Taniguchi Table 1
+GAMMA_VAL  = 0.25           # Γ GGE   [-],  Stock / MS3-as-built
 
-# K_sZ: uniform and low. Type III REQUIRES uniform K_sZ — the Taniguchi
-# allometric form collapses Type III (small-prey predators sit permanently in
-# the S²-refuge; see Baseline Construction Options.md §5). Value in the
-# literature window 0.15-0.5 mmol N m-3 (≈ Dutkiewicz 2015a); calibrate per obs.
-KSZ_UNIFORM = 0.5
-KsZ_arr     = np.full(N_CLASSES, KSZ_UNIFORM)   # (was 17.92·z^-0.64 allometric)
-
-DELTA_VAL  = 0.025          # zoo Δ [d-1] linear closure — matched reference models only
-GAMMA_VAL  = 0.25           # Γ GGE [-],  Stock / MS3-as-built (range 0.25-0.33)
-
-lambda_arr = 0.1 * mu_max_arr        # m_P = 0.1·μ_max (Banas 2011; size-dependent; was const 0.0015)
+lambda_arr = np.full(N_CLASSES, LAMBDA_VAL)
 delta_arr  = np.full(N_CLASSES, DELTA_VAL)
 
 
@@ -364,26 +343,20 @@ model_setup_baseline_fish = xso.setup(
 # =============================================================================
 # DISTRIBUTED-GRAZING VARIANTS — kernel grazing + quadratic closure
 # =============================================================================
-# THE SETTLED BASELINE CONSTRUCT (2026-06-06): distributed (kernel) grazing
+# Layered deviation beyond the matched baseline: distributed (kernel) grazing
 # (matched / herb / omni via the phiPZ mode) × {Type II, Type III}, with the
-# Banas-style distributed quadratic Z closure. Stock supply + sinking, modern
-# allometries (μ/k_s/I_max above), and UNIFORM low K_sZ (KsZ_arr; Type III
-# requires it). All grazing params are per-class arrays so the choice is always
-# explicit and cannot silently become a scalar. Default baseline = herb or omni
-# Type III; matched mode is the cross-check against the matched reference models.
+# Banas-style distributed quadratic Z closure. Same Stock supply + sinking,
+# same Taniguchi allometric μ/k_s, and — crucially — the SAME allometric
+# Imax_arr (33.96·z^-0.66) and KsZ_arr (17.92·z^-0.64) as the matched baseline,
+# passed as per-class arrays so the grazing allometry (the slope lever, Survey
+# §18) is explicit and cannot silently become a scalar.
 #
 # Exposed at module scope as model_setup_dist_<mode>_<resp>_{slim,stability}
 # for run_xso_parscan / run_xso_stabilityscan (model-by-name contract).
 
 THETA_OPT = 10.0    # predator:prey ESD ratio (matches ZOO_PHYTO_RATIO)
 SIGMA_LOG = 0.25    # kernel width, log10 ESD, 2σ² convention (Survey §9)
-M_Z_VAL   = 0.3     # quadratic closure coeff [(mmol N m-3)^-1 d-1]. ≈ Banas (2011)
-                    # Eq.10 analytical estimate for THIS allometry family (~0.26;
-                    # Survey §20.2) — an order below his abstract paper value 1.0.
-                    # Stabilises the high-F_N oscillation the modern (faster Tang/Banas
-                    # μ) allometries produce, while preserving large-cell extent
-                    # (m_Z=0.1 oscillates CV→0.7; m_Z=1.0 over-damps → mcs<4µm).
-                    # Was 0.1; raised 2026-06-06. Fit knob: range ~0.3-0.5.
+M_Z_VAL   = 0.1     # quadratic closure coeff [(mmol N m-3)^-1 d-1] (Banas/MS3)
 
 # Feeding-preference matrices — only phiPZ differs across the three modes.
 phiPZ_matched = compute_grazing_kernel(phyto_esd, zoo_esd, 'matched',
@@ -426,8 +399,8 @@ def make_dist_input_vars(phiPZ):
     """Input-vars dict for a distributed-grazing run. Only phiPZ varies across
     the three kernel modes — every other parameter is shared, which ENFORCES
     identical params across the matched/herb/omni comparison (the whole point:
-    no silent per-variant parameter drift). Imax_arr is the modern allometry
-    (26·z^-0.48); KsZ_arr is UNIFORM (0.5) — required for Type III."""
+    no silent per-variant parameter drift). Imax_arr / KsZ_arr are the same
+    Taniguchi allometric per-class arrays as the matched baseline."""
     return {
         'Nutrient':      {'value_label': 'N', 'value_init': N_INIT},
         'Phytoplankton': {'biomass_label': 'P', 'biomass_init': phyto_init,
