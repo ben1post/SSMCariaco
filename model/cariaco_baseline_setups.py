@@ -70,6 +70,8 @@ from cariaco_baseline_comps import (
     DistributedGrazing_TypeII, DistributedGrazing_TypeIII,
     DistributedGrazingRouter,
     ZooQuadraticLoss_recycled,
+    # Temperature (Cloern 2018 Q10 on growth + grazing) — folded into R0 (2026-06-06).
+    ConstantTemperatureForcing, MonodGrowth_T, DistributedGrazing_TypeIII_T,
 )
 
 # Fish-variant reuses the MS3-as-built kernel component for one-way fish
@@ -475,3 +477,71 @@ model_setup_dist_herb_t3_slim         = _dist_slim(model_dist_t3, phiPZ_herb)
 model_setup_dist_herb_t3_stability    = _dist_stab(model_dist_t3, phiPZ_herb)
 model_setup_dist_omni_t3_slim         = _dist_slim(model_dist_t3, phiPZ_omni)
 model_setup_dist_omni_t3_stability    = _dist_stab(model_dist_t3, phiPZ_omni)
+
+
+# =============================================================================
+# TEMPERATURE-AWARE R0 — distributed Type III + Q10 growth/grazing (Cloern 2018)
+# =============================================================================
+# Folded into R0 2026-06-06: growth ×= 1.62^((T-20)/10), grazing ×= 2.48^((T-20)/10).
+# Temperature is a per-regime forcing (box-mean Temp_C from cariaco_obs); override
+# Temperature__value per regime (upwelling cooler, relaxed warmer). The Q10 effect
+# in this model pushes the spectrum UP (more grazing crops small cells), so the
+# obs-fit K_sZ must be RE-FIT with temperature ON (likely higher than the no-temp
+# 0.25 — KSZ_UNIFORM=0.5 is the working default pending the re-fit).
+# Temperature: Cloern (2018, L&O 63:S392) simple Q10 on growth AND grazing, in
+# the Q10^((T-20)/10) form (Eqs 4, 6). Cloern is the closest 0D analogue (a
+# Taniguchi-M1 + temperature estuarine model) and is the right complexity for a
+# 0D box. Same principle as Dutkiewicz/Mattern (temperature on both, grazing more
+# T-sensitive than growth) but without their Arrhenius + per-type thermal-norm
+# machinery, which would over-specify a single-N box. (Earlier draft used the
+# Eppley 1.066^T growth value — that is the EMPOWER/Anderson choice, not these
+# three references — now reverted to Cloern.)
+Q10_GROW  = 1.62          # Cloern 2018 Eq.4 — phyto growth Q10
+Q10_GRAZE = 2.48          # Cloern 2018 Eq.6 — grazing Q10 (> growth; the size-
+                          # selective term that actually moves the spectrum).
+                          # Dutkiewicz/Mattern use ≈2.8. Set =1.0 for growth-only T.
+T_REF     = 20.0          # °C, Cloern reference temperature
+T_DEFAULT = 24.0    # °C, placeholder (overridden per regime via Temperature__value)
+
+model_dist_t3_T = xso.create({
+    'Nutrient':      Nutrient,
+    'Phytoplankton': PhytoSizeSpectrum,
+    'Zooplankton':   ZooSizeSpectrum,
+    'Inflow':        StockNutrientSupply,
+    'Temperature':   ConstantTemperatureForcing,
+    'Growth':        MonodGrowth_T,
+    'Grazing':       DistributedGrazing_TypeIII_T,
+    'GrazingRouter': DistributedGrazingRouter,
+    'PhytoLoss':     PhytoLinearLoss_recycled,
+    'ZooLoss':       ZooQuadraticLoss_recycled,
+    'PhytoSinking':  PhytoSinking_export,
+})
+
+
+def make_dist_T_input_vars(phiPZ):
+    """Temperature-aware input_vars: reuse the base distributed dict and add the
+    Temperature forcing + Q10/T_ref to Growth and Grazing. Only phiPZ varies
+    across kernel modes (same enforced-identical-params principle)."""
+    iv = make_dist_input_vars(phiPZ)
+    iv['Temperature'] = {'forcing_label': 'temperature', 'value': T_DEFAULT}
+    iv['Growth']  = {**iv['Growth'],  'temperature': 'temperature',
+                     'q10': Q10_GROW,  't_ref': T_REF}
+    iv['Grazing'] = {**iv['Grazing'], 'temperature': 'temperature',
+                     'q10': Q10_GRAZE, 't_ref': T_REF}
+    return iv
+
+
+def _distT_slim(phiPZ):
+    return xso.setup(solver='solve_ivp', model=model_dist_t3_T, time=ivp_time_array,
+                     input_vars=make_dist_T_input_vars(phiPZ),
+                     output_vars=SLIM_OUTPUT_VARS, solver_kwargs=IVP_SOLVER_KWARGS)
+
+def _distT_stab(phiPZ):
+    return xso.setup(solver='stability', model=model_dist_t3_T, time=STAB_TIME,
+                     input_vars=make_dist_T_input_vars(phiPZ))
+
+# R0 (temperature-aware) herb / omni setups
+model_setup_dist_herb_t3_T_slim      = _distT_slim(phiPZ_herb)
+model_setup_dist_herb_t3_T_stability = _distT_stab(phiPZ_herb)
+model_setup_dist_omni_t3_T_slim      = _distT_slim(phiPZ_omni)
+model_setup_dist_omni_t3_T_stability = _distT_stab(phiPZ_omni)

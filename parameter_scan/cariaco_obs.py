@@ -65,7 +65,8 @@ DIAGNOSTIC_COLS = [
 # =============================================================================
 def load_cariaco_targets(regime='all', csv_path=DEFAULT_CSV_PATH,
                          bin_definitions=TARGET_BIN_DEFINITIONS,
-                         regime_col=None, agg='mean', months='hplc'):
+                         regime_col=None, agg='mean', months='hplc',
+                         include_temperature=False):
     """
     Load CARIACO monthly observations and build the target vector for
     model-data comparison.
@@ -208,7 +209,24 @@ def load_cariaco_targets(regime='all', csv_path=DEFAULT_CSV_PATH,
                 f"Cannot compute forcing '{k}' for regime '{regime}' — "
                 f"source column has no valid values."
             )
-    
+
+    # Temperature forcing for the temperature-aware R0 model (MonodGrowth_T /
+    # DistributedGrazing_TypeIII_T). Opt-in (default off) so the forcing dict
+    # stays compatible with the non-temperature models — adding Temperature__value
+    # to a model that lacks it would fail the parscan fixed_overrides validation.
+    # Box-mean Temp_C, collapsed with the SAME agg as F_N / d_e.
+    if include_temperature:
+        if 'Temp_C' not in subset.columns:
+            raise ValueError(
+                f"include_temperature=True but 'Temp_C' is not in the data for "
+                f"regime '{regime}'.")
+        T = float(getattr(subset['Temp_C'], agg)(skipna=True))
+        if np.isnan(T):
+            raise ValueError(
+                f"Cannot compute Temperature for regime '{regime}' — "
+                f"'Temp_C' has no valid values under months='{months}'.")
+        forcing['Temperature__value'] = T
+
     labels = [b['label'] for b in bin_definitions]
 
     return obs_vec, labels, bin_definitions, monthly_df, forcing

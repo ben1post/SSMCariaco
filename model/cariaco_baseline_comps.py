@@ -534,3 +534,76 @@ class ZooQuadraticLoss_recycled:
     def recycle_to_N(self, population, rate):
         total_Z = self.m.sum(population)
         return rate * total_Z * total_Z
+
+
+# =============================================================================
+# TEMPERATURE — Q10 scaling of growth and grazing (Cloern 2018)
+# =============================================================================
+# Box temperature as a forcing (constant per regime for steady-state R0; swap
+# for a time-varying forcing for transient runs). Growth and grazing each scale
+# by Q10^((T - T_ref)/10). Cloern (2018): growth Q10 = 1.62, grazing Q10 = 2.48
+# (grazing rises with T faster than growth). T_ref = 20 °C (allometry reference).
+
+@xso.component
+class ConstantTemperatureForcing:
+    """Constant box temperature [°C] as a forcing (per-regime for R0)."""
+    forcing = xso.forcing(setup_func='forcing_setup',
+                          description='box temperature [°C]')
+    value = xso.parameter(description='temperature [°C]')
+
+    def forcing_setup(self, value):
+        @np.vectorize
+        def f(t):
+            return value
+        return f
+
+
+@xso.component
+class MonodGrowth_T:
+    """Monod nutrient uptake with Q10 temperature scaling on μ_max.
+
+        U(s_i) = Q10^((T-T_ref)/10) · μ(s_i) · N · P_i / (N + k_s,i)
+
+    Identical to MonodGrowth_NP plus the temperature factor (Cloern 2018).
+    """
+    resource = xso.variable(foreign=True, flux='uptake', negative=True,
+                            description='dissolved nitrogen (scalar sink)')
+    consumer = xso.variable(foreign=True, dims='phyto', flux='uptake',
+                            negative=False, description='phyto (per-class source)')
+    temperature = xso.forcing(foreign=True, description='box temperature [°C]')
+    mu_max = xso.parameter(dims='phyto', description='max growth rate per class [d-1]')
+    halfsat = xso.parameter(dims='phyto', description='nutrient half-sat per class')
+    q10 = xso.parameter(description='growth Q10 (Cloern 2018: 1.62)')
+    t_ref = xso.parameter(description='reference temperature [°C] (20)')
+
+    @xso.flux(dims='phyto')
+    def uptake(self, resource, consumer, temperature, mu_max, halfsat, q10, t_ref):
+        f_T = q10 ** ((temperature - t_ref) / 10.0)
+        return f_T * mu_max * resource * consumer / (resource + halfsat)
+
+
+@xso.component
+class DistributedGrazing_TypeIII_T:
+    """DistributedGrazing_TypeIII with Q10 temperature scaling on I_max.
+
+        G_kj = Q10^((T-T_ref)/10) · Imax_j · Z_j · φ_kj · B_k · S_j / (S_j² + KsZ_j²)
+
+    Cloern (2018) grazing Q10 = 2.48 (> growth's 1.62). Same group-flux routing
+    (DistributedGrazingRouter) as the non-temperature version.
+    """
+    resource = xso.variable(foreign=True, dims='phyto')
+    consumer = xso.variable(foreign=True, dims='zoo')
+    temperature = xso.forcing(foreign=True, description='box temperature [°C]')
+    phiPZ = xso.parameter(dims=('full', 'zoo'),
+                          description='feeding preference matrix (prey × predator)')
+    Imax = xso.parameter(dims='zoo', description='per-class max ingestion [d-1]')
+    KsZ = xso.parameter(dims='zoo', description='per-class grazing half-sat [mmol N m-3]')
+    q10 = xso.parameter(description='grazing Q10 (Cloern 2018: 2.48)')
+    t_ref = xso.parameter(description='reference temperature [°C] (20)')
+
+    @xso.flux(group='graze_matrix', dims=('full', 'zoo'))
+    def grazing(self, resource, consumer, temperature, phiPZ, Imax, KsZ, q10, t_ref):
+        f_T = q10 ** ((temperature - t_ref) / 10.0)
+        biomass = self.m.concatenate((resource, consumer))
+        S = self.m.sum(phiPZ * biomass[:, None], axis=0)
+        return f_T * Imax * consumer * phiPZ * biomass[:, None] * S / (S ** 2 + KsZ ** 2)
