@@ -384,7 +384,10 @@ model_setup_baseline_fish = xso.setup(
 # for run_xso_parscan / run_xso_stabilityscan (model-by-name contract).
 
 THETA_OPT = 10.0    # predator:prey ESD ratio (matches ZOO_PHYTO_RATIO)
-SIGMA_LOG = 0.25    # kernel width, log10 ESD, 2σ² convention (Survey §9)
+SIGMA_LOG     = 0.25   # ORIGINAL kernel width (log10 ESD, 2σ² convention). The
+                       # matched/herb/omni baseline kernels keep historical behavior.
+SIGMA_MATTERN = 0.15   # Mattern (2026) Eq.5 σ in the /σ² convention (= std 0.106),
+                       # for the Mattern-faithful omnivory construct only.
 M_Z_VAL   = 0.3     # quadratic closure coeff [(mmol N m-3)^-1 d-1]. ≈ Banas (2011)
                     # Eq.10 analytical estimate for THIS allometry family (~0.26;
                     # Survey §20.2) — an order below his abstract paper value 1.0.
@@ -400,6 +403,10 @@ phiPZ_herb    = compute_grazing_kernel(phyto_esd, zoo_esd, 'herb',
                                        THETA_OPT, SIGMA_LOG)
 phiPZ_omni    = compute_grazing_kernel(phyto_esd, zoo_esd, 'omni',
                                        THETA_OPT, SIGMA_LOG)
+# Mattern-faithful omnivory kernel (σ=0.15, /σ² convention; = std 0.106). Built
+# separately so the original-convention kernels above are untouched.
+phiPZ_omni_mattern = compute_grazing_kernel(phyto_esd, zoo_esd, 'omni',
+                                            THETA_OPT, SIGMA_MATTERN, convention='mattern')
 
 # Two model schemas (Type II vs Type III grazing matrix); the kernel mode is an
 # input (phiPZ), not a structural change, so it is NOT baked into the model.
@@ -551,6 +558,64 @@ model_setup_dist_herb_t3_T_slim      = _distT_slim(phiPZ_herb)
 model_setup_dist_herb_t3_T_stability = _distT_stab(phiPZ_herb)
 model_setup_dist_omni_t3_T_slim      = _distT_slim(phiPZ_omni)
 model_setup_dist_omni_t3_T_stability = _distT_stab(phiPZ_omni)
+
+# Mattern-faithful omnivory R0 (σ=0.15 /σ² kernel = std 0.106) — the construct for
+# the omnivory work. Original omni setups above keep the σ=0.25 (2σ²) kernel.
+model_setup_dist_omni_t3_T_mattern_slim      = _distT_slim(phiPZ_omni_mattern)
+model_setup_dist_omni_t3_T_mattern_stability = _distT_stab(phiPZ_omni_mattern)
+
+
+# =============================================================================
+# LINEAR + QUADRATIC zoo closure (Mattern SI S4.2) — adds ZooLinearLoss alongside
+# ZooLoss(quadratic). Mattern uses both, uniform (non-allometric); linear mortality
+# is their explicit large-Z biomass control lever (SI Fig S8). M_Z_LIN uniform here
+# (Taniguchi Δ=0.025 / Cloern 0.06 d-1); per-class array, so it can be made
+# size-dependent later (e.g. reduce on large Z, Mattern-style).
+# =============================================================================
+M_Z_LIN_DEFAULT = 0.05    # linear zoo mortality Δ [d-1], uniform
+
+model_dist_t3_T_zlin = xso.create({
+    'Nutrient':      Nutrient,
+    'Phytoplankton': PhytoSizeSpectrum,
+    'Zooplankton':   ZooSizeSpectrum,
+    'Inflow':        StockNutrientSupply,
+    'Temperature':   ConstantTemperatureForcing,
+    'Growth':        MonodGrowth_T,
+    'Grazing':       DistributedGrazing_TypeIII_T,
+    'GrazingRouter': DistributedGrazingRouter,
+    'PhytoLoss':     PhytoLinearLoss_recycled,
+    'ZooLoss':       ZooQuadraticLoss_recycled,
+    'ZooLossLin':    ZooLinearLoss_recycled,
+    'PhytoSinking':  PhytoSinking_export,
+})
+
+def make_dist_T_zlin_input_vars(phiPZ, m_lin=M_Z_LIN_DEFAULT):
+    iv = make_dist_T_input_vars(phiPZ)
+    iv['ZooLossLin'] = {'population': 'Z', 'nutrient': 'N',
+                        'rate': np.full(N_CLASSES, m_lin)}   # per-class (dims='zoo')
+    return iv
+
+def _distT_zlin_slim(phiPZ, m_lin=M_Z_LIN_DEFAULT):
+    return xso.setup(solver='solve_ivp', model=model_dist_t3_T_zlin, time=ivp_time_array,
+                     input_vars=make_dist_T_zlin_input_vars(phiPZ, m_lin),
+                     output_vars=SLIM_OUTPUT_VARS, solver_kwargs=IVP_SOLVER_KWARGS)
+
+def _distT_zlin_stab(phiPZ, m_lin=M_Z_LIN_DEFAULT):
+    return xso.setup(solver='stability', model=model_dist_t3_T_zlin, time=STAB_TIME,
+                     input_vars=make_dist_T_zlin_input_vars(phiPZ, m_lin))
+
+# omni-Mattern + linear&quadratic zoo closure
+model_setup_dist_omni_t3_T_zlin_slim      = _distT_zlin_slim(phiPZ_omni_mattern)
+model_setup_dist_omni_t3_T_zlin_stability = _distT_zlin_stab(phiPZ_omni_mattern)
+
+# Diagnostic variant: loosened instability floor (-1e-2) so small transient
+# negatives during spin-up don't abort the run — for the m_lin solve_ivp scan.
+# Genuine divergence still NaN-terminates (positive ceiling / non-finite).
+model_setup_dist_omni_t3_T_zlin_slim_loose = xso.setup(
+    solver='solve_ivp', model=model_dist_t3_T_zlin, time=ivp_time_array,
+    input_vars=make_dist_T_zlin_input_vars(phiPZ_omni_mattern),
+    output_vars=SLIM_OUTPUT_VARS,
+    solver_kwargs={**IVP_SOLVER_KWARGS, 'instability_neg_threshold': -1e-2})
 
 
 # =============================================================================

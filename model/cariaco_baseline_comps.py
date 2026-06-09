@@ -365,7 +365,7 @@ class PhytoSinking_export:
 # reads it and distributes per-prey loss / per-predator gain / N recycle.
 
 def compute_grazing_kernel(phyto_esd, zoo_esd, mode='omni',
-                           theta_opt=10.0, sigma_log=0.25):
+                           theta_opt=10.0, sigma_log=0.25, convention='2sigma2'):
     """Feeding-preference matrix phiPZ of shape (n_P + n_Z, n_Z).
 
     mode : {'matched', 'herb', 'omni'}
@@ -375,16 +375,25 @@ def compute_grazing_kernel(phyto_esd, zoo_esd, mode='omni',
         'herb'    — log-normal kernel on P prey only (Z-block zero).
         'omni'    — log-normal kernel on P+Z prey, Z-on-self diagonal zeroed
                     (no within-class cannibalism).
-    sigma_log is the kernel width in log10(ESD) space, 2*sigma**2 convention
-    (Survey §9; MS3 default sigma_log=0.25). theta_opt is the predator:prey
-    ESD ratio (kernel peak; Survey §9, MS3 default 10).
+    sigma_log is the kernel width in log10(ESD); `convention` selects the form:
+      '2sigma2' (DEFAULT, original MS3): exp(-(Δ)²/(2·σ²)); σ = Gaussian std,
+          historical MS3 value 0.25. Bare/legacy calls reproduce this exactly.
+      'mattern': exp(-((Δ)/σ)²); Mattern (2026) Eq.5 / Dutkiewicz (2020) form,
+          default σ=0.15 (≡ std 0.106). Use for the Mattern-faithful omnivory.
+    theta_opt is the predator:prey ESD ratio at the kernel peak (1:10).
     """
     phyto_esd = np.asarray(phyto_esd)
     zoo_esd = np.asarray(zoo_esd)
     n_P, n_Z = len(phyto_esd), len(zoo_esd)
     prey_esd = np.concatenate([phyto_esd, zoo_esd])
     log_ratio = np.log10(zoo_esd[None, :] / prey_esd[:, None])
-    kernel = np.exp(-((log_ratio - np.log10(theta_opt)) ** 2) / (2 * sigma_log ** 2))
+    delta = log_ratio - np.log10(theta_opt)
+    if convention == 'mattern':
+        kernel = np.exp(-(delta / sigma_log) ** 2)
+    elif convention == '2sigma2':
+        kernel = np.exp(-(delta ** 2) / (2.0 * sigma_log ** 2))
+    else:
+        raise ValueError(f"convention must be '2sigma2' or 'mattern', got {convention!r}")
     phiPZ = np.zeros((n_P + n_Z, n_Z))
     if mode == 'matched':
         for j in range(n_Z):
