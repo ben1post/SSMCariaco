@@ -18,9 +18,11 @@ cariaco_obs.load_cariaco_targets ({'Inflow__FN', 'Inflow__de'}) drops straight
 in as fixed_overrides / input_vars_override.
 
 Settled parameter choices and their literature anchors (Survey §§3-11):
-- μ_max:        2.6·s^-0.45  (Tang 1995 / Banas 2011, monotonic)
-- K_s:          0.144·s^0.81 (Ward 2012 / Marañón 2013 × Aksnes-Egge 1991)
-- I_max:        26·s^-0.48   (Stock/Hansen/Ward/Mattern broad-span e_g)
+- μ_max:        2.6·s^-0.45  (Banas 2011 Table 2 ←Tang 1995)   SINGLE-SOURCE
+- K_s:          0.1·s^1.0    (Banas 2011 Table 2, Eppley 1969)  SINGLE-SOURCE
+- I_max:        26·s^-0.40   (Banas 2011 Table 2)               SINGLE-SOURCE
+  [2026-06-08: switched to all-Banas; was K_s 0.144·s^0.81 (Marañón×Aksnes
+   synthesis) + I_max 26·s^-0.48 (spliced exponent) — both violated single-source]
 - K_sZ:         UNIFORM ≈0.5 (Hansen/Rohr/Mattern/Dutkiewicz; Type III REQUIRES
                 uniform K_sZ — Taniguchi allometric K_sZ collapses Type III)
 - m_P (phyto):  0.1·μ_max    (Banas 2011, size-dependent)
@@ -125,9 +127,9 @@ zoo_esd   = ZOO_PHYTO_RATIO * phyto_esd
 #   KsZ_arr    = 17.92 * zoo_esd   ** (-0.64)   # Taniguchi Eq. 10
 #   lambda_arr = np.full(N_CLASSES, 0.0015)     # Taniguchi const Λ
 
-mu_max_arr = 2.6   * phyto_esd ** (-0.45)   # Tang 1995 / Banas 2011 (was 1.36·s^-0.16)
-ks_arr     = 0.144 * phyto_esd ** ( 0.81)   # Ward 2012 / Marañón×Aksnes-Egge (was 0.33·s^0.48)
-Imax_arr   = 26.0  * zoo_esd   ** (-0.48)   # Stock/Hansen/Ward/Mattern e_g=-0.48 (was 33.96·z^-0.66)
+mu_max_arr = 2.6   * phyto_esd ** (-0.45)   # Banas 2011 Table 2 (←Tang 1995)
+ks_arr     = 0.1   * phyto_esd ** ( 1.0)    # Banas 2011 Table 2 (Eppley 1969 surface-area); single-source (was 0.144·s^0.81 mixed)
+Imax_arr   = 26.0  * zoo_esd   ** (-0.40)   # Banas 2011 Table 2; single-source (was -0.48 spliced exponent)
 
 # K_sZ: uniform and low. Type III REQUIRES uniform K_sZ — the Taniguchi
 # allometric form collapses Type III (small-prey predators sit permanently in
@@ -604,18 +606,10 @@ def _distT_zlin_stab(phiPZ, m_lin=M_Z_LIN_DEFAULT):
     return xso.setup(solver='stability', model=model_dist_t3_T_zlin, time=STAB_TIME,
                      input_vars=make_dist_T_zlin_input_vars(phiPZ, m_lin))
 
-# omni-Mattern + linear&quadratic zoo closure
+# omni-Mattern + linear&quadratic zoo closure (default solver settings; pass any
+# non-default solver_kwargs — e.g. a looser instability floor — at scan/run time)
 model_setup_dist_omni_t3_T_zlin_slim      = _distT_zlin_slim(phiPZ_omni_mattern)
 model_setup_dist_omni_t3_T_zlin_stability = _distT_zlin_stab(phiPZ_omni_mattern)
-
-# Diagnostic variant: loosened instability floor (-1e-2) so small transient
-# negatives during spin-up don't abort the run — for the m_lin solve_ivp scan.
-# Genuine divergence still NaN-terminates (positive ceiling / non-finite).
-model_setup_dist_omni_t3_T_zlin_slim_loose = xso.setup(
-    solver='solve_ivp', model=model_dist_t3_T_zlin, time=ivp_time_array,
-    input_vars=make_dist_T_zlin_input_vars(phiPZ_omni_mattern),
-    output_vars=SLIM_OUTPUT_VARS,
-    solver_kwargs={**IVP_SOLVER_KWARGS, 'instability_neg_threshold': -1e-2})
 
 
 # =============================================================================
