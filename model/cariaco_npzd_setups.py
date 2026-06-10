@@ -29,7 +29,8 @@ from cariaco_npzd_comps import (
     Nutrient, PhytoSizeSpectrum, ZooSizeSpectrum, Detritus,
     StockNutrientSupply, ConstantTemperatureForcing,
     MonodGrowth_T, DistributedGrazing_TypeIII_T, DistributedGrazingRouter_route,
-    PhytoMortality_route, ZooLinearMortality_route, ZooQuadraticMortality_route,
+    PhytoMortality_route, BanasPhytoMortality_route,
+    ZooLinearMortality_route, ZooQuadraticMortality_route,
     DetritusRemineralization, DetritusSinking, FishGrazing_Kernel_rate,
     compute_grazing_kernel, compute_fish_kernel_vdl_joint,
 )
@@ -52,6 +53,14 @@ mP_arr     = 0.1 * mu_max_arr                  # m_P = 0.1·μ_max (Banas 2011)
 zoo_vol  = (np.pi / 6.0) * zoo_esd ** 3
 Imax_arr = np.where(zoo_esd <= 30.0, 9.8, 30.9 * zoo_vol ** (-0.16))
 
+# ---- ALTERNATIVE growth: Taniguchi 2014 Table 1 (added 2026-06-10) -----------
+# Banas growth (steep μ + surface-area K_s extrapolated to the 0.2µm Pico floor)
+# collapses the spectrum to Pico; Taniguchi's own-synthesis μ/K_s (ESD-native,
+# fit over 0.8µm–1.9mm) give a coexisting, F_N-responsive Pico↔Micro spectrum.
+mu_max_tani = 1.36 * phyto_esd ** (-0.16)      # d⁻¹        (Taniguchi 2014 Table 1)
+ks_tani     = 0.33 * phyto_esd ** ( 0.48)      # mmol N m⁻³ (Taniguchi 2014 Table 1)
+mP_tani     = 0.1 * mu_max_tani                # Banas rule on Taniguchi μ (consistent default)
+
 # ---- scalar params ----------------------------------------------------------
 GGE_VAL    = 0.25      # gross growth efficiency (Stock 2008)
 K_SZ       = 0.23      # grazing half-sat [mmol N m-3], uniform (Dutkiewicz k_p ÷6.625)
@@ -66,6 +75,7 @@ GRAZE_FRAC_D        = 0.75   # unassimilated grazing -> D (Fasham); rest -> N
 GRAZE_FRAC_EXPORT   = 0.0
 PHYTO_MORT_FRAC_D   = 0.9    # phyto mortality -> D; rest -> N (Fasham-style)
 PHYTO_MORT_FRAC_EXPORT = 0.0
+BANAS_MORT_COEFF    = 0.1    # Banas non-grazing mortality = 10% of μ_max (m_P=coeff·μ_max)
 ZOO_LIN_FRAC_D      = 1.0    # linear Z mortality -> 100% D (basic setup, Benny)
 ZOO_LIN_FRAC_EXPORT = 0.0
 ZOO_QUAD_FRAC_D     = 0.5    # quadratic closure: 50% D, 50% export (Stock-style)
@@ -133,7 +143,8 @@ model_npzd = xso.create({
 
 
 def make_npzd_input_vars(fish_rate=FISH_RATE, phiPZ=phiPZ_omni,
-                         FN=FN_DEFAULT, de=DE_DEFAULT, T=T_DEFAULT):
+                         FN=FN_DEFAULT, de=DE_DEFAULT, T=T_DEFAULT,
+                         mu_max=mu_max_arr, halfsat=ks_arr, mP=mP_arr):
     """Input-vars for the NPZD baseline. Override fish_rate / FN / de / T per
     regime or scan. `de` is broadcast (single source of truth) — overriding it
     here drives both the supply F_N/d_e and the detritus sinking w_sink/d_e."""
@@ -149,7 +160,7 @@ def make_npzd_input_vars(fish_rate=FISH_RATE, phiPZ=phiPZ_omni,
         'Inflow':           {'var': 'N', 'FN': FN, 'de': de, 'de_label': 'de'},
         'Temperature':      {'forcing_label': 'temperature', 'value': T},
         'Growth':           {'resource': 'N', 'consumer': 'P', 'temperature': 'temperature',
-                             'mu_max': mu_max_arr, 'halfsat': ks_arr,
+                             'mu_max_label': 'mu_max', 'mu_max': mu_max, 'halfsat': halfsat,
                              'q10': Q10_GROW, 't_ref': T_REF},
         'Grazing':          {'resource': 'P', 'consumer': 'Z', 'temperature': 'temperature',
                              'phiPZ': phiPZ, 'Imax': Imax_arr, 'KsZ': KsZ_arr,
@@ -159,7 +170,7 @@ def make_npzd_input_vars(fish_rate=FISH_RATE, phiPZ=phiPZ_omni,
                              'excreted_nutrient': 'N', 'gge': GGE_VAL,
                              'frac_D': GRAZE_FRAC_D, 'frac_export': GRAZE_FRAC_EXPORT},
         'PhytoMortality':   {'population': 'P', 'detritus': 'D', 'nutrient': 'N',
-                             'rate': mP_arr, 'frac_D': PHYTO_MORT_FRAC_D,
+                             'rate': mP, 'frac_D': PHYTO_MORT_FRAC_D,
                              'frac_export': PHYTO_MORT_FRAC_EXPORT},
         'ZooLinMortality':  {'population': 'Z', 'detritus': 'D', 'nutrient': 'N',
                              'rate': M_ZLIN, 'frac_D': ZOO_LIN_FRAC_D,
@@ -188,3 +199,80 @@ model_setup_npzd_slim = xso.setup(
 model_setup_npzd_stability = xso.setup(
     solver='stability', model=model_npzd, time=STAB_TIME,
     input_vars=make_npzd_input_vars())
+
+# ---- Taniguchi-growth setups (go-forward; all Banas setups above unchanged) --
+# Taniguchi μ/K_s (+ consistent Banas-rule mortality mP_tani). The mortality scan
+# overrides PhytoMortality__rate per literature treatment; the default here is the
+# consistent 0.1·Tani-μ. `model_setup_npzd_tani_scan` adds a slim output + a
+# loosened instability guard so parscan cells don't NaN on small negative dips.
+_TANI = dict(mu_max=mu_max_tani, halfsat=ks_tani, mP=mP_tani)
+
+model_setup_npzd_tani = xso.setup(
+    solver='solve_ivp', model=model_npzd, time=ivp_time_array,
+    input_vars=make_npzd_input_vars(**_TANI), solver_kwargs=IVP_SOLVER_KWARGS)
+
+model_setup_npzd_tani_slim = xso.setup(
+    solver='solve_ivp', model=model_npzd, time=ivp_time_array,
+    input_vars=make_npzd_input_vars(**_TANI), output_vars=SLIM_OUTPUT_VARS,
+    solver_kwargs=IVP_SOLVER_KWARGS)
+
+model_setup_npzd_tani_scan = xso.setup(
+    solver='solve_ivp', model=model_npzd, time=ivp_time_array,
+    input_vars=make_npzd_input_vars(**_TANI), output_vars=SLIM_OUTPUT_VARS,
+    solver_kwargs={**IVP_SOLVER_KWARGS, 'instability_neg_threshold': -1e-3})
+
+model_setup_npzd_tani_stability = xso.setup(
+    solver='stability', model=model_npzd, time=STAB_TIME,
+    input_vars=make_npzd_input_vars(**_TANI))
+
+# ---- Banas-mortality model variant (proper foreign-μ_max mortality) ----------
+# Identical to model_npzd except PhytoMortality is the Banas form: m_P = coeff·μ_max·P
+# with μ_max foreign-referenced from Growth (so it tracks the actual growth allometry).
+# coeff is a SCALAR (PhytoMortality__coeff) -> a clean parscan axis for the mortality
+# sweep. Paired with Taniguchi growth below.
+model_npzd_banas = xso.create({
+    'Nutrient':         Nutrient,
+    'Phytoplankton':    PhytoSizeSpectrum,
+    'Zooplankton':      ZooSizeSpectrum,
+    'Detritus':         Detritus,
+    'Inflow':           StockNutrientSupply,
+    'Temperature':      ConstantTemperatureForcing,
+    'Growth':           MonodGrowth_T,
+    'Grazing':          DistributedGrazing_TypeIII_T,
+    'GrazingRouter':    DistributedGrazingRouter_route,
+    'PhytoMortality':   BanasPhytoMortality_route,    # <-- only change vs model_npzd
+    'ZooLinMortality':  ZooLinearMortality_route,
+    'ZooQuadMortality': ZooQuadraticMortality_route,
+    'DetritusRemin':    DetritusRemineralization,
+    'DetritusSink':     DetritusSinking,
+    'FishGrazing':      FishGrazing_Kernel_rate,
+})
+
+
+def make_npzd_banas_input_vars(coeff=BANAS_MORT_COEFF, **kw):
+    """Input-vars for model_npzd_banas: same as make_npzd_input_vars but the
+    PhytoMortality slot is the Banas form (foreign μ_max + scalar coeff). Pass
+    growth via mu_max=/halfsat= (e.g. the Taniguchi arrays). The `mP=` kwarg of
+    make_npzd_input_vars is ignored here (the whole PhytoMortality slot is replaced)."""
+    iv = make_npzd_input_vars(**kw)
+    iv['PhytoMortality'] = {'population': 'P', 'detritus': 'D', 'nutrient': 'N',
+                            'mu_max': 'mu_max', 'coeff': coeff,
+                            'frac_D': PHYTO_MORT_FRAC_D, 'frac_export': PHYTO_MORT_FRAC_EXPORT}
+    return iv
+
+
+_TANI_BANAS = dict(mu_max=mu_max_tani, halfsat=ks_tani)   # growth only; mortality = coeff·μ_max
+
+model_setup_npzd_banas = xso.setup(
+    solver='solve_ivp', model=model_npzd_banas, time=ivp_time_array,
+    input_vars=make_npzd_banas_input_vars(**_TANI_BANAS), solver_kwargs=IVP_SOLVER_KWARGS)
+
+model_setup_npzd_banas_slim = xso.setup(
+    solver='solve_ivp', model=model_npzd_banas, time=ivp_time_array,
+    input_vars=make_npzd_banas_input_vars(**_TANI_BANAS), output_vars=SLIM_OUTPUT_VARS,
+    solver_kwargs=IVP_SOLVER_KWARGS)
+
+model_setup_npzd_banas_scan = xso.setup(
+    solver='solve_ivp', model=model_npzd_banas, time=ivp_time_array,
+    input_vars=make_npzd_banas_input_vars(**_TANI_BANAS), output_vars=SLIM_OUTPUT_VARS,
+    solver_kwargs={**IVP_SOLVER_KWARGS, 'instability_neg_threshold': -1e-3})

@@ -192,7 +192,9 @@ class MonodGrowth_T:
     consumer = xso.variable(foreign=True, dims='phyto', flux='uptake',
                             negative=False, description='phyto (per-class source)')
     temperature = xso.forcing(foreign=True, description='box temperature [°C]')
-    mu_max = xso.parameter(dims='phyto', description='max growth rate per class [d-1]')
+    mu_max = xso.parameter(broadcast=True, dims='phyto',
+                           description='max growth rate per class [d-1] (broadcast so a '
+                                       'mortality component can foreign-reference it)')
     halfsat = xso.parameter(dims='phyto', description='nutrient half-sat per class')
     q10 = xso.parameter(description='growth Q10 (Cloern 2018: 1.62)')
     t_ref = xso.parameter(description='reference temperature [°C] (20)')
@@ -320,6 +322,37 @@ class PhytoMortality_route:
     @xso.flux
     def mortality_to_N(self, population, detritus, nutrient, rate, frac_D, frac_export):
         return self.m.sum(rate * population) * (1.0 - frac_D - frac_export)
+
+
+@xso.component
+class BanasPhytoMortality_route:
+    """Banas (2011) non-grazing mortality, m_P = coeff·μ_max·P, with μ_max
+    FOREIGN-referenced (broadcast) from the growth component so it always tracks
+    the actual growth allometry in use. Banas DEFINES mortality as a fraction of
+    the max growth rate, so it must follow μ_max rather than be a frozen array;
+    that is the difference from PhytoMortality_route (which takes a fixed `rate`).
+    `coeff` is a scalar (0.1 = Banas's 10%) and so is a clean scan axis. Routed
+    N / D / export identically to PhytoMortality_route."""
+    population = xso.variable(foreign=True, dims='phyto', flux='mortality', negative=True)
+    detritus = xso.variable(foreign=True, flux='mortality_to_D', negative=False)
+    nutrient = xso.variable(foreign=True, flux='mortality_to_N', negative=False)
+    mu_max = xso.parameter(foreign=True, dims='phyto',
+                           description='max growth rate (foreign, from the growth component)')
+    coeff = xso.parameter(description='Banas mortality coefficient (0.1 = 10% of μ_max)')
+    frac_D = xso.parameter(description='fraction of phyto mortality -> D')
+    frac_export = xso.parameter(description='fraction exported (remainder -> N)')
+
+    @xso.flux(dims='phyto')
+    def mortality(self, population, detritus, nutrient, mu_max, coeff, frac_D, frac_export):
+        return coeff * mu_max * population
+
+    @xso.flux
+    def mortality_to_D(self, population, detritus, nutrient, mu_max, coeff, frac_D, frac_export):
+        return self.m.sum(coeff * mu_max * population) * frac_D
+
+    @xso.flux
+    def mortality_to_N(self, population, detritus, nutrient, mu_max, coeff, frac_D, frac_export):
+        return self.m.sum(coeff * mu_max * population) * (1.0 - frac_D - frac_export)
 
 
 @xso.component
