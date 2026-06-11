@@ -24,6 +24,7 @@ fractions / m_Zlin / m_Z to test mortality-form and routing combinations.
 import os
 import numpy as np
 import xso
+from xso.parscans import avg_tail  # re-export so run_xso_parscan can find it by name
 
 from cariaco_npzd_comps import (
     Nutrient, PhytoSizeSpectrum, ZooSizeSpectrum, Detritus,
