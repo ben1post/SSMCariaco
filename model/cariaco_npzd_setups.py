@@ -32,6 +32,7 @@ from cariaco_npzd_comps import (
     MonodGrowth_T, DistributedGrazing_TypeIII_T, DistributedGrazingRouter_route,
     PhytoMortality_route, BanasPhytoMortality_route,
     ZooLinearMortality_route, ZooQuadraticMortality_route,
+    ZooQuadraticMortality_perclass_route,
     DetritusRemineralization, DetritusSinking, FishGrazing_Kernel_rate,
     compute_grazing_kernel, compute_fish_kernel_vdl_joint,
 )
@@ -222,9 +223,143 @@ model_setup_npzd_tani_scan = xso.setup(
     input_vars=make_npzd_input_vars(**_TANI), output_vars=SLIM_OUTPUT_VARS,
     solver_kwargs={**IVP_SOLVER_KWARGS, 'instability_neg_threshold': -1e-3})
 
+# Long-time variant for stability/persistence checks (4× longer integration)
+ivp_time_array_long = np.arange(0.0, 20000.0, 1.0)
+model_setup_npzd_tani_scan_long = xso.setup(
+    solver='solve_ivp', model=model_npzd, time=ivp_time_array_long,
+    input_vars=make_npzd_input_vars(**_TANI), output_vars=SLIM_OUTPUT_VARS,
+    solver_kwargs={**IVP_SOLVER_KWARGS, 'instability_neg_threshold': -1e-3})
+
+
+# ---- Resolution-variant builder (for sensitivity tests) ---------------------
+def _build_grid_arrays(N_classes):
+    """Build all size-dependent arrays for an alternative resolution.
+    Returns a dict consumed by _make_input_vars_at_resolution."""
+    phyto_ = np.logspace(np.log10(PHYTO_ESD_MIN), np.log10(PHYTO_ESD_MAX), N_classes)
+    zoo_   = ZOO_PHYTO_RATIO * phyto_
+    mu_max_ = 1.36 * phyto_ ** -0.16
+    ks_     = 0.33 * phyto_ **  0.48
+    mP_     = 0.1 * mu_max_
+    zvol_   = (np.pi / 6.0) * zoo_ ** 3
+    Imax_   = np.where(zoo_ <= 30.0, 9.8, 30.9 * zvol_ ** -0.16)
+    KsZ_    = np.full(N_classes, K_SZ)
+    phiPZ_  = compute_grazing_kernel(phyto_, zoo_, mode='omni',
+                                     sigma_log=0.15, theta_opt=10.0)
+    kP_, kZ_ = compute_fish_kernel_vdl_joint(phyto_, zoo_)
+    return dict(N=N_classes, phyto_esd=phyto_, zoo_esd=zoo_,
+                mu_max=mu_max_, halfsat=ks_, mP=mP_,
+                Imax=Imax_, KsZ=KsZ_, phiPZ=phiPZ_,
+                phyto_init=np.full(N_classes, P_INIT),
+                zoo_init=np.full(N_classes, Z_INIT),
+                kernel_P_fish=kP_, kernel_Z_fish=kZ_)
+
+def _make_input_vars_at_resolution(grids, fish_rate=FISH_RATE,
+                                    FN=FN_DEFAULT, de=DE_DEFAULT, T=T_DEFAULT):
+    """Build input_vars dict from a resolution-specific grid dict."""
+    return {
+        'Nutrient':         {'value_label': 'N', 'value_init': N_INIT},
+        'Phytoplankton':    {'biomass_label': 'P', 'biomass_init': grids['phyto_init'],
+                             'phyto_esd_index': grids['phyto_esd'].tolist(),
+                             'phyto_esd_label': 'phyto_esd'},
+        'Zooplankton':      {'biomass_label': 'Z', 'biomass_init': grids['zoo_init'],
+                             'zoo_esd_index': grids['zoo_esd'].tolist(),
+                             'zoo_esd_label': 'zoo_esd'},
+        'Detritus':         {'value_label': 'D', 'value_init': D_INIT},
+        'Inflow':           {'var': 'N', 'FN': FN, 'de': de, 'de_label': 'de'},
+        'Temperature':      {'forcing_label': 'temperature', 'value': T},
+        'Growth':           {'resource': 'N', 'consumer': 'P', 'temperature': 'temperature',
+                             'mu_max_label': 'mu_max',
+                             'mu_max': grids['mu_max'], 'halfsat': grids['halfsat'],
+                             'q10': Q10_GROW, 't_ref': T_REF},
+        'Grazing':          {'resource': 'P', 'consumer': 'Z', 'temperature': 'temperature',
+                             'phiPZ': grids['phiPZ'], 'Imax': grids['Imax'],
+                             'KsZ': grids['KsZ'],
+                             'q10': Q10_GRAZE, 't_ref': T_REF},
+        'GrazingRouter':    {'grazed_phyto': 'P', 'grazed_zoo': 'Z',
+                             'assimilated_consumer': 'Z', 'egested_detritus': 'D',
+                             'excreted_nutrient': 'N', 'gge': GGE_VAL,
+                             'frac_D': GRAZE_FRAC_D, 'frac_export': GRAZE_FRAC_EXPORT},
+        'PhytoMortality':   {'population': 'P', 'detritus': 'D', 'nutrient': 'N',
+                             'rate': grids['mP'], 'frac_D': PHYTO_MORT_FRAC_D,
+                             'frac_export': PHYTO_MORT_FRAC_EXPORT},
+        'ZooLinMortality':  {'population': 'Z', 'detritus': 'D', 'nutrient': 'N',
+                             'rate': M_ZLIN, 'frac_D': ZOO_LIN_FRAC_D,
+                             'frac_export': ZOO_LIN_FRAC_EXPORT},
+        'ZooQuadMortality': {'population': 'Z', 'detritus': 'D', 'nutrient': 'N',
+                             'rate': M_Z, 'frac_D': ZOO_QUAD_FRAC_D,
+                             'frac_export': ZOO_QUAD_FRAC_EXPORT},
+        'DetritusRemin':    {'detritus': 'D', 'nutrient': 'N', 'k_remin': K_REMIN},
+        'DetritusSink':     {'detritus': 'D', 'w_sink': W_SINK, 'de': 'de'},
+        'FishGrazing':      {'phyto': 'P', 'zoo': 'Z',
+                             'kernel_P': grids['kernel_P_fish'],
+                             'kernel_Z': grids['kernel_Z_fish'],
+                             'rate': fish_rate},
+    }
+
+# Pre-built resolution variants — baseline N_CLASSES = 40 is unchanged.
+_GRIDS_LORES = _build_grid_arrays(20)
+_GRIDS_HIRES = _build_grid_arrays(80)
+
+model_setup_npzd_tani_scan_lores = xso.setup(
+    solver='solve_ivp', model=model_npzd, time=ivp_time_array,
+    input_vars=_make_input_vars_at_resolution(_GRIDS_LORES),
+    output_vars=SLIM_OUTPUT_VARS,
+    solver_kwargs={**IVP_SOLVER_KWARGS, 'instability_neg_threshold': -1e-3})
+
+model_setup_npzd_tani_scan_hires = xso.setup(
+    solver='solve_ivp', model=model_npzd, time=ivp_time_array,
+    input_vars=_make_input_vars_at_resolution(_GRIDS_HIRES),
+    output_vars=SLIM_OUTPUT_VARS,
+    solver_kwargs={**IVP_SOLVER_KWARGS, 'instability_neg_threshold': -1e-3})
+
+# Expose the variant grids so notebooks can read phyto_esd / band masks for plotting
+phyto_esd_lores = _GRIDS_LORES['phyto_esd']
+zoo_esd_lores   = _GRIDS_LORES['zoo_esd']
+phyto_esd_hires = _GRIDS_HIRES['phyto_esd']
+zoo_esd_hires   = _GRIDS_HIRES['zoo_esd']
+
+
 model_setup_npzd_tani_stability = xso.setup(
     solver='stability', model=model_npzd, time=STAB_TIME,
     input_vars=make_npzd_input_vars(**_TANI))
+
+# ---- Per-class quadratic Z closure variant ----------------------------------
+# Identical to model_npzd except the quadratic zoo closure uses m_Z·Z_j²
+# (each class self-regulates) instead of m_Z·Z_j·ΣZ (bulk coupling). Tests
+# whether the omnivory-driven mcs descending limb depends on inter-class
+# coupling through ΣZ. Paired with Taniguchi growth in the *_tani_perclassZ_*
+# setups below.
+model_npzd_perclassZ = xso.create({
+    'Nutrient':         Nutrient,
+    'Phytoplankton':    PhytoSizeSpectrum,
+    'Zooplankton':      ZooSizeSpectrum,
+    'Detritus':         Detritus,
+    'Inflow':           StockNutrientSupply,
+    'Temperature':      ConstantTemperatureForcing,
+    'Growth':           MonodGrowth_T,
+    'Grazing':          DistributedGrazing_TypeIII_T,
+    'GrazingRouter':    DistributedGrazingRouter_route,
+    'PhytoMortality':   PhytoMortality_route,
+    'ZooLinMortality':  ZooLinearMortality_route,
+    'ZooQuadMortality': ZooQuadraticMortality_perclass_route,  # <-- only change
+    'DetritusRemin':    DetritusRemineralization,
+    'DetritusSink':     DetritusSinking,
+    'FishGrazing':      FishGrazing_Kernel_rate,
+})
+
+model_setup_npzd_tani_perclassZ = xso.setup(
+    solver='solve_ivp', model=model_npzd_perclassZ, time=ivp_time_array,
+    input_vars=make_npzd_input_vars(**_TANI), solver_kwargs=IVP_SOLVER_KWARGS)
+
+model_setup_npzd_tani_perclassZ_slim = xso.setup(
+    solver='solve_ivp', model=model_npzd_perclassZ, time=ivp_time_array,
+    input_vars=make_npzd_input_vars(**_TANI), output_vars=SLIM_OUTPUT_VARS,
+    solver_kwargs=IVP_SOLVER_KWARGS)
+
+model_setup_npzd_tani_perclassZ_scan = xso.setup(
+    solver='solve_ivp', model=model_npzd_perclassZ, time=ivp_time_array,
+    input_vars=make_npzd_input_vars(**_TANI), output_vars=SLIM_OUTPUT_VARS,
+    solver_kwargs={**IVP_SOLVER_KWARGS, 'instability_neg_threshold': -1e-3})
 
 # ---- Banas-mortality model variant (proper foreign-μ_max mortality) ----------
 # Identical to model_npzd except PhytoMortality is the Banas form: m_P = coeff·μ_max·P

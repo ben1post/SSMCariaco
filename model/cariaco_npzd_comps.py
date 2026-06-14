@@ -406,6 +406,36 @@ class ZooQuadraticMortality_route:
         return total * (1.0 - frac_D - frac_export)
 
 
+@xso.component
+class ZooQuadraticMortality_perclass_route:
+    """Per-class quadratic zoo closure m_Z·Z_j², routed N / D / export.
+
+    Variant of ZooQuadraticMortality_route — replaces bulk Z_j·ΣZ with
+    per-class Z_j² so each zoo class self-regulates without inter-class
+    coupling through the total zoo biomass. Default routing matches the
+    bulk form (frac_D=0.5, frac_export=0.5 = Stock-style)."""
+    population = xso.variable(foreign=True, dims='zoo', flux='mortality', negative=True)
+    detritus = xso.variable(foreign=True, flux='mortality_to_D', negative=False)
+    nutrient = xso.variable(foreign=True, flux='mortality_to_N', negative=False)
+    rate = xso.parameter(description='per-class quadratic coeff m_Z [(mmol N m-3)^-1 d-1]')
+    frac_D = xso.parameter(description='fraction of quadratic closure -> D')
+    frac_export = xso.parameter(description='fraction exported (remainder -> N)')
+
+    @xso.flux(dims='zoo')
+    def mortality(self, population, detritus, nutrient, rate, frac_D, frac_export):
+        return rate * population * population
+
+    @xso.flux
+    def mortality_to_D(self, population, detritus, nutrient, rate, frac_D, frac_export):
+        total = rate * self.m.sum(population * population)
+        return total * frac_D
+
+    @xso.flux
+    def mortality_to_N(self, population, detritus, nutrient, rate, frac_D, frac_export):
+        total = rate * self.m.sum(population * population)
+        return total * (1.0 - frac_D - frac_export)
+
+
 # =============================================================================
 # DETRITUS — REMINERALIZATION (-> N) AND SINKING (export)
 # =============================================================================
