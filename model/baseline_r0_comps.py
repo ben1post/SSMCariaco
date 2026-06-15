@@ -285,6 +285,53 @@ class DistributedGrazing_TypeIII_T:
 
 
 @xso.component
+class DistributedGrazing_TypeIII_T_Herb:
+    """Herbivorous variant of DistributedGrazing_TypeIII_T — zoo eat phyto ONLY
+    (no zoo-on-zoo grazing). Kernel built with mode='herb' so the zoo-as-prey
+    rows of phiPZ are zero.
+
+    Same scalar K_sZ + setup_func phiPZ + Q10 structure as the omnivory
+    component; only the kernel-mode argument changes. Use this variant to
+    test whether the cross-regime tension under sustained F_N comes from
+    omnivory (the Taniguchi Model 3 non-monotonic mcs(F_N) phenomenon
+    documented in the F_N × mcs investigation) by running the same scans
+    with herbivory.
+    """
+    resource = xso.variable(foreign=True, dims='phyto')
+    consumer = xso.variable(foreign=True, dims='zoo')
+    temperature = xso.forcing(foreign=True, description='box temperature [°C]')
+
+    phyto_esd = xso.parameter(foreign=True, dims='phyto',
+                              description='phyto size grid [µm] (foreign-ref)')
+    zoo_esd = xso.parameter(foreign=True, dims='zoo',
+                            description='zoo size grid [µm] (foreign-ref)')
+
+    theta_opt = xso.parameter(description='predator:prey ESD ratio at kernel peak (typ. 10)')
+    sigma_log = xso.parameter(description='kernel width σ in log10(ESD) space (typ. 0.15, Mattern)')
+
+    phiPZ = xso.parameter(dims=('full', 'zoo'), setup_func='_build_phiPZ',
+                          description='log-Gaussian HERBIVORY kernel (zoo eat phyto only); '
+                                      'zoo-as-prey rows zeroed via mode="herb"')
+
+    Imax = xso.parameter(dims='zoo', description='per-class max ingestion [d-1]')
+    KsZ = xso.parameter(description='grazing half-sat [mmol N m-3] (scalar, uniform)')
+    q10 = xso.parameter(description='grazing Q10 (Cloern 2018: 2.48)')
+    t_ref = xso.parameter(description='reference temperature [°C] (20)')
+
+    def _build_phiPZ(self, phyto_esd, zoo_esd, theta_opt, sigma_log):
+        return compute_grazing_kernel(phyto_esd, zoo_esd, mode='herb',
+                                      theta_opt=theta_opt, sigma_log=sigma_log,
+                                      convention='mattern')
+
+    @xso.flux(group='graze_matrix', dims=('full', 'zoo'))
+    def grazing(self, resource, consumer, temperature, phiPZ, Imax, KsZ, q10, t_ref):
+        f_T = q10 ** ((temperature - t_ref) / 10.0)
+        biomass = self.m.concatenate((resource, consumer))
+        S = self.m.sum(phiPZ * biomass[:, None], axis=0)
+        return f_T * Imax * consumer * phiPZ * biomass[:, None] * S / (S ** 2 + KsZ ** 2)
+
+
+@xso.component
 class DistributedGrazingRouter_route:
     """Route the 'graze_matrix' group: assimilate GGE·I to Z, remove grazed
     biomass from P and Z, and route the unassimilated (1-GGE) fraction

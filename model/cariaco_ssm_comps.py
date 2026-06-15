@@ -528,3 +528,67 @@ class FishGrazing_Kernel:
     def fish_graze_zoo(self, phyto, zoo, fish_forcing,
                        kernel_P, kernel_Z, rate):
         return rate * fish_forcing * kernel_Z * zoo
+
+
+# =============================================================================
+# QUADRATIC PHYTO MORTALITY (quick test, 2026-06-15) — density-dependent
+# non-grazing loss, routed D / N like the linear PhytoMortality_toD_toN.
+# Scalar `rate` (so it scans cleanly). Two forms:
+#   per-class : m·P_i²        (each class self-limits)
+#   bulk      : m·P_i·ΣP      (each class limited by total phyto biomass)
+# Used in traditional NPZD closures (aggregation / viral lysis ∝ density);
+# not standard in size-spectral models — exploratory here.
+# =============================================================================
+
+@xso.component
+class PhytoQuadraticMortality_perclass_toD:
+    """Per-class quadratic phyto mortality  m·P_i²,  routed D / N."""
+    population = xso.variable(dims='phyto', foreign=True,
+                              flux='mortality', negative=True)
+    detritus = xso.variable(foreign=True, flux='mortality_to_D', negative=False)
+    nutrient = xso.variable(foreign=True, flux='mortality_to_N', negative=False)
+
+    rate = xso.parameter(description='per-class quadratic phyto mortality coeff '
+                                     '[(mmol N m-3)^-1 d-1] (scalar)')
+    f_mort_D = xso.parameter(
+        description='fraction of phyto mortality routed to D (remainder to N)')
+
+    @xso.flux(dims='phyto')
+    def mortality(self, population, detritus, nutrient, rate, f_mort_D):
+        return rate * population * population
+
+    @xso.flux
+    def mortality_to_D(self, population, detritus, nutrient, rate, f_mort_D):
+        return self.m.sum(rate * population * population) * f_mort_D
+
+    @xso.flux
+    def mortality_to_N(self, population, detritus, nutrient, rate, f_mort_D):
+        return self.m.sum(rate * population * population) * (1 - f_mort_D)
+
+
+@xso.component
+class PhytoQuadraticMortality_bulk_toD:
+    """Bulk quadratic phyto mortality  m·P_i·ΣP,  routed D / N."""
+    population = xso.variable(dims='phyto', foreign=True,
+                              flux='mortality', negative=True)
+    detritus = xso.variable(foreign=True, flux='mortality_to_D', negative=False)
+    nutrient = xso.variable(foreign=True, flux='mortality_to_N', negative=False)
+
+    rate = xso.parameter(description='bulk quadratic phyto mortality coeff '
+                                     '[(mmol N m-3)^-1 d-1] (scalar)')
+    f_mort_D = xso.parameter(
+        description='fraction of phyto mortality routed to D (remainder to N)')
+
+    @xso.flux(dims='phyto')
+    def mortality(self, population, detritus, nutrient, rate, f_mort_D):
+        return rate * population * self.m.sum(population)
+
+    @xso.flux
+    def mortality_to_D(self, population, detritus, nutrient, rate, f_mort_D):
+        total = rate * self.m.sum(population) * self.m.sum(population)
+        return total * f_mort_D
+
+    @xso.flux
+    def mortality_to_N(self, population, detritus, nutrient, rate, f_mort_D):
+        total = rate * self.m.sum(population) * self.m.sum(population)
+        return total * (1 - f_mort_D)

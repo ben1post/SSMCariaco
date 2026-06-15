@@ -50,7 +50,9 @@ from xso.parscans import avg_tail  # re-export so run_xso_parscan can find it by
 from baseline_r0_comps import (
     Nutrient, PhytoSizeSpectrum, ZooSizeSpectrum, Detritus,
     StockNutrientSupply, ConstantTemperatureForcing,
-    MonodGrowth_T, DistributedGrazing_TypeIII_T, DistributedGrazingRouter_route,
+    MonodGrowth_T,
+    DistributedGrazing_TypeIII_T, DistributedGrazing_TypeIII_T_Herb,
+    DistributedGrazingRouter_route,
     PhytoMortality_route, BanasPhytoMortality_route,
     ZooLinearMortality_route, ZooQuadraticMortality_route,
     ZooQuadraticMortality_perclass_route,
@@ -367,3 +369,42 @@ setup_baseline_perclassZ_banas_slim = xso.setup(
 setup_baseline_perclassZ_banas_stability = xso.setup(
     solver='stability', model=model_baseline_perclassZ_banas, time=STAB_TIME,
     input_vars=make_baseline_banas_input_vars(m_Z=M_Z_PERCLASS))
+
+# =============================================================================
+# Herbivory variant (added 2026-06-14 for cross-regime tension diagnostic)
+# =============================================================================
+# Zoo eat phyto only (no zoo-on-zoo). Same scalar K_sZ + setup_func phiPZ +
+# Q10 structure as the main model; only the kernel mode differs.
+# Use to test whether the cross-regime tension under sustained F_N stems
+# from omnivory (Taniguchi Model 3 non-monotonic mcs(F_N) phenomenon).
+model_baseline_herb = xso.create({
+    'Nutrient':         Nutrient,
+    'Phytoplankton':    PhytoSizeSpectrum,
+    'Zooplankton':      ZooSizeSpectrum,
+    'Detritus':         Detritus,
+    'Inflow':           StockNutrientSupply,
+    'Temperature':      ConstantTemperatureForcing,
+    'Growth':           MonodGrowth_T,
+    'Grazing':          DistributedGrazing_TypeIII_T_Herb,    # <- swap vs model_baseline
+    'GrazingRouter':    DistributedGrazingRouter_route,
+    'PhytoMortality':   PhytoMortality_route,
+    'ZooLinMortality':  ZooLinearMortality_route,
+    'ZooQuadMortality': ZooQuadraticMortality_route,
+    'DetritusRemin':    DetritusRemineralization,
+    'DetritusSink':     DetritusSinking,
+    'FishGrazing':      FishGrazing_Kernel_rate,
+})
+
+setup_baseline_herb = xso.setup(
+    solver='solve_ivp', model=model_baseline_herb, time=ivp_time_array,
+    input_vars=make_baseline_input_vars(),
+    solver_kwargs=IVP_SOLVER_KWARGS)
+
+setup_baseline_herb_slim = xso.setup(
+    solver='solve_ivp', model=model_baseline_herb, time=ivp_time_array,
+    input_vars=make_baseline_input_vars(), output_vars=SLIM_OUTPUT_VARS,
+    solver_kwargs=IVP_SOLVER_KWARGS)
+
+setup_baseline_herb_stability = xso.setup(
+    solver='stability', model=model_baseline_herb, time=STAB_TIME,
+    input_vars=make_baseline_input_vars())

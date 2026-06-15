@@ -22,6 +22,8 @@ from cariaco_ssm_comps import (
     Detritus,
     GGE_Full_withD,
     PhytoMortality_toD_toN,
+    PhytoQuadraticMortality_perclass_toD,
+    PhytoQuadraticMortality_bulk_toD,
     ZooQuadraticMortality_toD,
     DetritusRemineralization,
     DetritusSinking,
@@ -317,8 +319,126 @@ model_setup_slim = xso.setup(
 )
 
 model_setup_stability = xso.setup(
-    solver='stability', 
+    solver='stability',
     model=model,
     time=[0,1],
     input_vars=input_vars
 )
+
+
+# =============================================================================
+# GRID VARIANTS — floor (0.5→0.2 µm) × resolution (12/40/80) difference-tests
+# (added 2026-06-15). Same `model` + Marañón allometries + scalar defaults;
+# ONLY the phyto grid floor and class count change. Growth can still be
+# overridden to Taniguchi at scan time via Growth__mu_max / Growth__halfsat /
+# PhytoMortality__rate (arrays computed on the matching exported *_phyto_esd_*).
+# input_vars is helper-built (cf. baseline_r0_setups.make_baseline_input_vars);
+# each named setup below is spelled out explicitly.
+# =============================================================================
+
+_SLIM_OUT = {'Phytoplankton__biomass', 'Zooplankton__biomass', 'Nutrient__value',
+             'Detritus__value', 'DetritusSink__sinking_value',
+             'Growth__uptake_value', 'Inflow__de'}
+
+def make_ssm_input_vars(n_cls, esd_min_phyto):
+    """cariaco_ssm input_vars on a phyto grid [esd_min_phyto, 200] µm, n_cls
+    log-spaced classes (zoo = 10× phyto). Marañón growth, old I_max, fish ON,
+    scalar defaults identical to the module baseline. Returns (p_esd, z_esd, iv)."""
+    p_esd = generate_size_classes(n_cls, esd_min_phyto, 200.0)
+    z_esd = generate_size_classes(n_cls, 10.0 * esd_min_phyto, 2000.0)
+    mu = compute_mu_max_maranon(p_esd)
+    ks = compute_K_s(p_esd)
+    mp = 0.1 * mu
+    im = compute_I_max(z_esd)
+    kP, kZ = compute_fish_kernel_vdl_joint(p_esd, z_esd)
+    iv = {
+        'Nutrient':       {'value_label': 'N', 'value_init': N_init},
+        'Phytoplankton':  {'biomass_label': 'P', 'biomass_init': np.full(n_cls, 0.01),
+                           'phyto_esd_index': p_esd.tolist(), 'phyto_esd_label': 'phyto_esd'},
+        'Zooplankton':    {'biomass_label': 'Z', 'biomass_init': np.full(n_cls, 0.001),
+                           'zoo_esd_index': z_esd.tolist(), 'zoo_esd_label': 'zoo_esd'},
+        'Detritus':       {'value_label': 'D', 'value_init': D_init},
+        'Inflow':         {'var': 'N', 'FN': F_N, 'de': d_e},
+        'Growth':         {'resource': 'N', 'consumer': 'P', 'halfsat': ks, 'mu_max': mu},
+        'Grazing':        {'resource': 'P', 'consumer': 'Z',
+                           'phyto_esd': 'phyto_esd', 'zoo_esd': 'zoo_esd',
+                           'theta_opt': 10.0, 'sigma_log': 0.25, 'Imax': im, 'KsZ': KsZ},
+        'GGE':            {'grazed_phyto': 'P', 'grazed_zoo': 'Z', 'assimilated_consumer': 'Z',
+                           'egested_detritus': 'D', 'excreted_nutrient': 'N',
+                           'gge': gge, 'f_egest_D': f_egest_D_zoo},
+        'PhytoMortality': {'population': 'P', 'detritus': 'D', 'nutrient': 'N',
+                           'rate': mp, 'f_mort_D': f_mort_D_phyto},
+        'ZooMortality':   {'population': 'Z', 'detritus': 'D', 'rate': m_Z, 'f_mort_D': f_mort_D_zoo},
+        'FishForcing':    {'forcing_label': 'F_forcing', 'value': fish_biomass},
+        'FishGrazing':    {'phyto': 'P', 'zoo': 'Z', 'fish_forcing': 'F_forcing',
+                           'kernel_P': kP, 'kernel_Z': kZ, 'rate': fish_rate},
+        'DetritusRemin':  {'detritus': 'D', 'nutrient': 'N', 'k_remin': k_remin},
+        'DetritusSink':   {'detritus': 'D', 'sinking_rate': sinking_rate},
+    }
+    return p_esd, z_esd, iv
+
+def _ssm_slim_setup(n_cls, esd_min_phyto):
+    _, _, iv = make_ssm_input_vars(n_cls, esd_min_phyto)
+    return xso.setup(solver='solve_ivp', model=model, time=np.arange(0, 5000, 1),
+                     input_vars=iv, output_vars=_SLIM_OUT)
+
+# Exposed grids (use the one matching the setup you scan, to build Taniguchi overrides)
+phyto_esd_f02_n12, zoo_esd_f02_n12, _ = make_ssm_input_vars(12, 0.2)
+phyto_esd_f05_n40, zoo_esd_f05_n40, _ = make_ssm_input_vars(40, 0.5)
+phyto_esd_f05_n80, zoo_esd_f05_n80, _ = make_ssm_input_vars(80, 0.5)
+phyto_esd_f02_n40, zoo_esd_f02_n40, _ = make_ssm_input_vars(40, 0.2)
+phyto_esd_f02_n80, zoo_esd_f02_n80, _ = make_ssm_input_vars(80, 0.2)
+
+# Named slim setups (parscan targets) — floor × resolution
+model_setup_slim_f02_n12 = _ssm_slim_setup(12, 0.2)   # floor only (vs the 12/0.5 baseline)
+model_setup_slim_f05_n40 = _ssm_slim_setup(40, 0.5)   # resolution only
+model_setup_slim_f05_n80 = _ssm_slim_setup(80, 0.5)   # resolution only
+model_setup_slim_f02_n40 = _ssm_slim_setup(40, 0.2)   # floor + resolution (≈ current grid)
+model_setup_slim_f02_n80 = _ssm_slim_setup(80, 0.2)   # floor + resolution
+
+
+# =============================================================================
+# QUADRATIC PHYTO MORTALITY variants (quick test, 2026-06-15) — f02_n40 grid.
+# Swap the linear PhytoMortality for a quadratic form (per-class or bulk).
+# Growth defaults to Marañón (module); override Growth__mu_max/halfsat for
+# Taniguchi at scan time. The quadratic coefficient is the scalar
+# PhytoMortality__rate (scan axis for the magnitude test).
+# =============================================================================
+
+def _phytoquad_input_vars(quad_rate=0.1):
+    """f02_n40 input_vars with the PhytoMortality slot wired for a SCALAR
+    quadratic-mortality coefficient (used by both quad components)."""
+    _, _, iv = make_ssm_input_vars(40, 0.2)
+    iv['PhytoMortality'] = {'population': 'P', 'detritus': 'D', 'nutrient': 'N',
+                            'rate': quad_rate, 'f_mort_D': f_mort_D_phyto}
+    return iv
+
+model_phytoquad_pc = xso.create({
+    'Nutrient': Nutrient, 'Phytoplankton': PhytoSizeSpectrum,
+    'Zooplankton': ZooSizeSpectrum, 'Detritus': Detritus,
+    'Inflow': StockNutrientSupply, 'Growth': MonodGrowth_SizeBased,
+    'Grazing': SizebasedGrazingMatrix_Full_TypeIII, 'GGE': GGE_Full_withD,
+    'PhytoMortality': PhytoQuadraticMortality_perclass_toD,   # <- per-class m·P²
+    'ZooMortality': ZooQuadraticMortality_toD,
+    'DetritusRemin': DetritusRemineralization, 'DetritusSink': DetritusSinking,
+    'FishForcing': ConstantFishForcing, 'FishGrazing': FishGrazing_Kernel,
+})
+
+model_phytoquad_bulk = xso.create({
+    'Nutrient': Nutrient, 'Phytoplankton': PhytoSizeSpectrum,
+    'Zooplankton': ZooSizeSpectrum, 'Detritus': Detritus,
+    'Inflow': StockNutrientSupply, 'Growth': MonodGrowth_SizeBased,
+    'Grazing': SizebasedGrazingMatrix_Full_TypeIII, 'GGE': GGE_Full_withD,
+    'PhytoMortality': PhytoQuadraticMortality_bulk_toD,        # <- bulk m·P·ΣP
+    'ZooMortality': ZooQuadraticMortality_toD,
+    'DetritusRemin': DetritusRemineralization, 'DetritusSink': DetritusSinking,
+    'FishForcing': ConstantFishForcing, 'FishGrazing': FishGrazing_Kernel,
+})
+
+model_setup_slim_phytoquad_pc = xso.setup(
+    solver='solve_ivp', model=model_phytoquad_pc, time=np.arange(0, 5000, 1),
+    input_vars=_phytoquad_input_vars(), output_vars=_SLIM_OUT)
+
+model_setup_slim_phytoquad_bulk = xso.setup(
+    solver='solve_ivp', model=model_phytoquad_bulk, time=np.arange(0, 5000, 1),
+    input_vars=_phytoquad_input_vars(), output_vars=_SLIM_OUT)

@@ -200,6 +200,34 @@ def extract_scan_metrics_2d(scan, axis_name_1, axis_name_2, forcing,
 
 
 # =============================================================================
+# Single-point extraction (no scan dim) — for IVP comparisons against obs
+# =============================================================================
+def extract_single_point_metrics(out, forcing, tail=1000,
+                                 phyto_dim='phyto', zoo_dim='zoo',
+                                 bin_geomeans=CARIACO_PHYTO_BIN_GEOMEANS,
+                                 bin_labels=DEFAULT_SIEBURTH_LABELS,
+                                 sieburth_ranges=DEFAULT_SIEBURTH_RANGES,
+                                 zoo_thresholds=DEFAULT_ZOO_THRESHOLDS):
+    """Tail-mean diagnostic metrics from a single-point IVP output dataset.
+
+    Same diagnostic variables as extract_scan_metrics_1d/2d, but for a single
+    full-time-series IVP run (no scan dim). Tail-mean is taken over the last
+    `tail` time steps. Returns a dict of scalar floats, keyed by variable:
+    'mcs', 'P_pico', 'P_nano', 'P_micro', 'sumP', 'sumZ', 'Z_gt200',
+    'Z_gt500', 'N', 'D', 'PP', 'Export'.
+    """
+    # Subset to just the variables we actually need before averaging — avoids
+    # xarray trying to mean string-valued metadata variables.
+    needed = ['Phytoplankton__biomass', 'Zooplankton__biomass',
+              'Nutrient__value', 'Detritus__value',
+              'Growth__uptake_value', 'DetritusSink__sinking_value']
+    out_tail = out[needed].isel(time=slice(-tail, None)).mean('time')
+    das = _extract_common(out_tail, forcing, phyto_dim, zoo_dim, bin_geomeans,
+                          bin_labels, sieburth_ranges, zoo_thresholds)
+    return {k: float(v.values) for k, v in das.items()}
+
+
+# =============================================================================
 # Observation reference dict from monthly_df
 # =============================================================================
 def _safe_median(series):
@@ -379,6 +407,62 @@ def print_scan_table_2d(metrics, obs_refs, header, axis_labels,
         for rank, k in enumerate(flat_idx, start=1):
             ii, jj = np.unravel_index(k, err.shape)
             print(_row(ii, jj, f"#{rank}"))
+
+
+# =============================================================================
+# Single-point comparison table (one or more model runs vs obs)
+# =============================================================================
+def print_single_point_comparison(metrics_dict, obs_refs, header,
+                                  label_col_width=10):
+    """Print a comparison table with one or more labelled single-point runs
+    plus an obs reference row, in the same column layout as
+    print_scan_table_1d.
+
+    Parameters
+    ----------
+    metrics_dict : dict {label: metrics_scalar_dict}
+        Each value is a dict of scalars as returned by
+        extract_single_point_metrics. Insertion order is the row order.
+    obs_refs : dict
+        Per-target obs medians from build_obs_refs.
+    header : str
+        Printed above the table (regime / config description).
+    label_col_width : int, optional
+        Width of the leftmost label column. Default 10.
+    """
+    print(f"\n=== {header} ===")
+    print(f"{'config':>{label_col_width}} {'mcs':>6} {'Pico':>7} {'Nano':>7} "
+          f"{'Micro':>7} {'ΣP':>7} {'Z>200':>7} {'Z>500':>7} {'ΣZ':>7} "
+          f"{'N':>7} {'D':>7} {'PP':>7} {'Exp':>7}")
+
+    def _row(label, m):
+        return (f"{label:>{label_col_width}} "
+                f"{_fmt_mcs(m.get('mcs', np.nan))} "
+                f"{_fmt3(m.get('P_pico', np.nan))} {_fmt3(m.get('P_nano', np.nan))} "
+                f"{_fmt3(m.get('P_micro', np.nan))} {_fmt3(m.get('sumP', np.nan))} "
+                f"{_fmt4(m.get('Z_gt200', np.nan))} {_fmt4(m.get('Z_gt500', np.nan))} "
+                f"{_fmt3(m.get('sumZ', np.nan))} {_fmt3(m.get('N', np.nan))} "
+                f"{_fmt3(m.get('D', np.nan))} {_fmt3(m.get('PP', np.nan))} "
+                f"{_fmt3(m.get('Export', np.nan))}")
+
+    for label, m in metrics_dict.items():
+        print(_row(label, m))
+    # Obs row — same column layout; sumZ and D have no obs.
+    obs_metrics = dict(
+        mcs=obs_refs.get('mcs', np.nan),
+        P_pico=obs_refs.get('P_pico', np.nan),
+        P_nano=obs_refs.get('P_nano', np.nan),
+        P_micro=obs_refs.get('P_micro', np.nan),
+        sumP=obs_refs.get('sumP', np.nan),
+        Z_gt200=obs_refs.get('Z_gt200', np.nan),
+        Z_gt500=obs_refs.get('Z_gt500', np.nan),
+        sumZ=np.nan,
+        N=obs_refs.get('N', np.nan),
+        D=np.nan,
+        PP=obs_refs.get('PP', np.nan),
+        Export=obs_refs.get('Export', np.nan),
+    )
+    print(_row('obs', obs_metrics))
 
 
 # =============================================================================
