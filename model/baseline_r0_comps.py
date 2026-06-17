@@ -332,6 +332,54 @@ class DistributedGrazing_TypeIII_T_Herb:
 
 
 @xso.component
+class DistributedGrazing_TypeII_T:
+    """Distributed (kernel) Holling Type II grazing with Q10 on I_max — community
+    saturated, NO low-prey refuge. Same structure as DistributedGrazing_TypeIII_T
+    (omnivory kernel via setup_func, Q10, publishes 'graze_matrix') but the
+    saturation is S_j/(S_j+K_sZ) (Type II) rather than S_j²/(S_j²+K_sZ²) (Type III):
+
+        G_kj = Q10^((T-T_ref)/10) · I_max,j · Z_j · φ_kj · B_k / (S_j + K_sZ)
+        S_j  = Σ_k φ_kj · B_k
+
+    Banas (2011) Eq. 8 form generalised to the distributed kernel. At low prey it
+    grazes ∝ S (no rare-prey refuge); at high prey total ingestion → I_max,j·Z_j.
+    NOTE: K_sZ here is the TYPE II half-saturation (Banas K ≈ 3 mmol N) — NOT the
+    same quantity as the Type III 0.23.
+    """
+    resource = xso.variable(foreign=True, dims='phyto')
+    consumer = xso.variable(foreign=True, dims='zoo')
+    temperature = xso.forcing(foreign=True, description='box temperature [°C]')
+
+    phyto_esd = xso.parameter(foreign=True, dims='phyto',
+                              description='phyto size grid [µm] (foreign-ref)')
+    zoo_esd = xso.parameter(foreign=True, dims='zoo',
+                            description='zoo size grid [µm] (foreign-ref)')
+
+    theta_opt = xso.parameter(description='predator:prey ESD ratio at kernel peak (typ. 10)')
+    sigma_log = xso.parameter(description='kernel width σ in log10(ESD) space')
+
+    phiPZ = xso.parameter(dims=('full', 'zoo'), setup_func='_build_phiPZ',
+                          description='log-Gaussian omnivory kernel (mode="omni")')
+
+    Imax = xso.parameter(dims='zoo', description='per-class max ingestion [d-1]')
+    KsZ = xso.parameter(description='TYPE II grazing half-sat [mmol N m-3] (Banas K≈3)')
+    q10 = xso.parameter(description='grazing Q10 (Cloern 2018: 2.48)')
+    t_ref = xso.parameter(description='reference temperature [°C] (20)')
+
+    def _build_phiPZ(self, phyto_esd, zoo_esd, theta_opt, sigma_log):
+        return compute_grazing_kernel(phyto_esd, zoo_esd, mode='omni',
+                                      theta_opt=theta_opt, sigma_log=sigma_log,
+                                      convention='mattern')
+
+    @xso.flux(group='graze_matrix', dims=('full', 'zoo'))
+    def grazing(self, resource, consumer, temperature, phiPZ, Imax, KsZ, q10, t_ref):
+        f_T = q10 ** ((temperature - t_ref) / 10.0)
+        biomass = self.m.concatenate((resource, consumer))
+        S = self.m.sum(phiPZ * biomass[:, None], axis=0)
+        return f_T * Imax * consumer * phiPZ * biomass[:, None] / (S + KsZ)
+
+
+@xso.component
 class DistributedGrazingRouter_route:
     """Route the 'graze_matrix' group: assimilate GGE·I to Z, remove grazed
     biomass from P and Z, and route the unassimilated (1-GGE) fraction

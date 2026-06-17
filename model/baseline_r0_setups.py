@@ -408,3 +408,40 @@ setup_baseline_herb_slim = xso.setup(
 setup_baseline_herb_stability = xso.setup(
     solver='stability', model=model_baseline_herb, time=STAB_TIME,
     input_vars=make_baseline_input_vars())
+
+
+# =============================================================================
+# Old cariaco_ssm model — approximated with the EXISTING components on the 40/0.2
+# grid (2026-06-15). Built on model_baseline_banas; no cariaco_ssm imports.
+# Carries the Scan5 FIT (the "good" old-model run), translated to baseline_r0
+# param names: Marañón μ + K_s 0.144·s^0.81, I_max 26·s^-0.48, K_sZ 0.487, θ 10,
+# GGE 0.174, grazing losses 0.556→D, Banas 0.1·μ mortality 0.477→D, bulk-quad zoo
+# m_Z 0.1 (0.5 D / 0.5 export), k_remin 0.076, w_sink 5, fish r_F 0.005, d_e 50.
+# T=20 neutralises the Q10 terms (→ no temperature, like the old model); m_Zlin=0
+# drops the linear zoo term the old model lacked. Two unavoidable differences vs
+# the literal old model: the 40/0.2 grid (vs 12/0.5), and the Mattern kernel form
+# (width-matched via σ=0.354 ≡ the old 2σ² kernel's std of 0.25).
+# =============================================================================
+_mu_maranon_old = np.where(phyto_esd <= 5.38, 0.33 * phyto_esd ** 0.57,
+                                              1.83 * phyto_esd ** -0.45)
+_ks_old         = 0.144 * phyto_esd ** 0.81
+_imax_old       = 26.0  * zoo_esd ** -0.48
+
+def make_oldssm_approx_input_vars():
+    """Old cariaco_ssm model with the Scan5 fit, on the 40/0.2 grid, using
+    model_baseline_banas components. T=20 neutralises Q10; m_Zlin=0 drops the
+    linear zoo term; σ=0.354 width-matches the old 2σ² kernel (std 0.25)."""
+    iv = make_baseline_banas_input_vars(
+        fish_rate=0.005, de=50.0, T=20.0,
+        mu_max=_mu_maranon_old, halfsat=_ks_old, coeff=0.1)
+    iv['Grazing']         = {**iv['Grazing'], 'Imax': _imax_old, 'KsZ': 0.487, 'sigma_log': 0.354}
+    iv['GrazingRouter']   = {**iv['GrazingRouter'], 'gge': 0.17416, 'frac_D': 0.55602}
+    iv['PhytoMortality']  = {**iv['PhytoMortality'], 'frac_D': 0.47651}
+    iv['DetritusRemin']   = {**iv['DetritusRemin'], 'k_remin': 0.07590}
+    iv['ZooLinMortality'] = {**iv['ZooLinMortality'], 'rate': 0.0}
+    return iv
+
+setup_oldssm_approx_slim = xso.setup(
+    solver='solve_ivp', model=model_baseline_banas, time=ivp_time_array,
+    input_vars=make_oldssm_approx_input_vars(), output_vars=SLIM_OUTPUT_VARS,
+    solver_kwargs=IVP_SOLVER_KWARGS)
