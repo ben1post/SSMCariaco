@@ -46,6 +46,7 @@ import os
 import numpy as np
 import xso
 from xso.parscans import avg_tail  # re-export so run_xso_parscan can find it by name
+from parscan_utils_extended import avg_tail_stats  # noqa: F401  (re-export: avg_tail + realised CV / flags)
 
 from baseline_r0_comps import (
     Nutrient, PhytoSizeSpectrum, ZooSizeSpectrum, Detritus,
