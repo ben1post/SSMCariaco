@@ -7,11 +7,12 @@ Three new components, using only the proven XSO foreign-forcing pattern (a forci
 is published by one component and foreign-referenced by its consumers — exactly how
 `temperature` already reaches MonodGrowth_T / DistributedGrazing_TypeIII_T):
 
-- SeasonalForcing : a pure forcing provider (no flux). Owns the seasonal F_N(t) as a
-  PERIODIC spline through the 12 calendar-month mean F_N values (EMPOWER / Anderson
-  et al. 2015 pattern: per=True spline evaluated at np.mod(t, period)), and DERIVES
-  d_e(t) and T(t) from F_N(t) via the obs linear regressions (clamped). F_N(t) is the
-  SINGLE SOURCE OF TRUTH for the whole seasonal cycle. Publishes three forcings:
+- SeasonalForcing : a pure forcing provider (no flux). Owns the seasonal F_N(t), d_e(t)
+  and T(t) as INDEPENDENT periodic splines, each through its own 12 calendar-month obs
+  means (EMPOWER / Anderson et al. 2015 pattern: per=True spline evaluated at
+  np.mod(t, period)). d_e(t) and T(t) are forced DIRECTLY from the obs era climatologies
+  (no longer derived from F_N — the F_N->d_e/T regression matched the annual mean but
+  compressed the bloom-season amplitude; 2026-06-22). Publishes three forcings:
   fn (label 'fn'), de (label 'de'), temperature (label 'temperature').
 - SeasonalNutrientSupply : the Stock (2008) supply flux J = F_N(t)/d_e(t) -> N,
   foreign-referencing the fn and de forcings.
@@ -56,17 +57,17 @@ def _build_fn_func(fn_monthly, period, spline_k, spline_s):
 
 @xso.component
 class SeasonalForcing:
-    """Seasonal forcing provider: F_N(t) periodic spline; d_e(t), T(t) derived.
+    """Seasonal forcing provider: F_N(t), d_e(t), T(t) as independent periodic splines.
 
-        F_N(t) = periodic spline through the 12 calendar-month means (>= 0)
-        d_e(t) = clip(de_a - de_b * F_N(t), de_lo, de_hi)
-        T(t)   = clip(t_a  - t_b  * F_N(t), t_lo,  t_hi)
+        F_N(t) = periodic spline through the 12 calendar-month F_N obs means (>= 0)
+        d_e(t) = periodic spline through the 12 calendar-month d_e obs means
+        T(t)   = periodic spline through the 12 calendar-month T  obs means
 
-    Pure forcing component (no flux / no state variable). d_e(t) and T(t) derive from
-    F_N(t), so the cycle has ONE source of truth. The three forcings are published
-    under labels (fn_label / de_label / temperature_label) for SeasonalNutrientSupply,
-    DetritusSinking_seasonal, and MonodGrowth_T / DistributedGrazing_TypeIII_T to
-    foreign-reference.
+    Pure forcing component (no flux / no state variable). d_e(t) and T(t) are forced
+    DIRECTLY from their obs climatologies (not derived from F_N; 2026-06-22). The three
+    forcings are published under labels (fn_label / de_label / temperature_label) for
+    SeasonalNutrientSupply, DetritusSinking_seasonal, and MonodGrowth_T /
+    DistributedGrazing_TypeIII_T to foreign-reference.
     """
     month = xso.index(dims='month', as_parameter=True,
                       description='calendar-month index for the F_N climatology')
@@ -77,15 +78,10 @@ class SeasonalForcing:
     spline_k = xso.parameter(description='periodic spline degree (1 linear / 3 cubic)')
     spline_s = xso.parameter(description='periodic spline smoothing s (0 = interpolate)')
 
-    de_a  = xso.parameter(description='d_e(F_N) intercept [m]')
-    de_b  = xso.parameter(description='d_e(F_N) slope [m per mmol N m-2 d-1]')
-    de_lo = xso.parameter(description='d_e lower clamp [m]')
-    de_hi = xso.parameter(description='d_e upper clamp [m]')
-
-    t_a  = xso.parameter(description='T(F_N) intercept [°C]')
-    t_b  = xso.parameter(description='T(F_N) slope [°C per mmol N m-2 d-1]')
-    t_lo = xso.parameter(description='T lower clamp [°C]')
-    t_hi = xso.parameter(description='T upper clamp [°C]')
+    de_monthly = xso.parameter(dims='month',
+                               description='12 calendar-month mean d_e [m] (forced directly from obs)')
+    t_monthly  = xso.parameter(dims='month',
+                               description='12 calendar-month mean T [°C] (forced directly from obs)')
 
     fn          = xso.forcing(setup_func='make_fn',
                               description='seasonal new-N flux F_N(t) [mmol N m-2 d-1]')
@@ -97,19 +93,11 @@ class SeasonalForcing:
     def make_fn(self, fn_monthly, period, spline_k, spline_s):
         return _build_fn_func(fn_monthly, period, spline_k, spline_s)
 
-    def make_de(self, fn_monthly, period, spline_k, spline_s, de_a, de_b, de_lo, de_hi):
-        fn_of_t = _build_fn_func(fn_monthly, period, spline_k, spline_s)
+    def make_de(self, de_monthly, period, spline_k, spline_s):
+        return _build_fn_func(de_monthly, period, spline_k, spline_s)
 
-        def de_of_t(t):
-            return np.clip(de_a - de_b * fn_of_t(t), de_lo, de_hi)
-        return de_of_t
-
-    def make_temperature(self, fn_monthly, period, spline_k, spline_s, t_a, t_b, t_lo, t_hi):
-        fn_of_t = _build_fn_func(fn_monthly, period, spline_k, spline_s)
-
-        def t_of_t(t):
-            return np.clip(t_a - t_b * fn_of_t(t), t_lo, t_hi)
-        return t_of_t
+    def make_temperature(self, t_monthly, period, spline_k, spline_s):
+        return _build_fn_func(t_monthly, period, spline_k, spline_s)
 
 
 @xso.component
