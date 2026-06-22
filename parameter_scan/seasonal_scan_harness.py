@@ -60,6 +60,18 @@ SCORE_KEYS = ['mcs', 'pico', 'nano', 'micro']
 # All metrics carried per run.
 METRIC_KEYS = ['mcs', 'pico', 'nano', 'micro', 'Z200', 'Z500', 'sumP', 'N', 'PP', 'Export', 'D']
 
+# param_grid flat keys -> (iv slot, param). mP / m_Z are handled as make_seasonal_input_vars
+# args; everything below is applied as a post-build iv override.
+_PARAM_SLOT = {
+    'KsZ': ('Grazing', 'KsZ'), 'sigma_log': ('Grazing', 'sigma_log'),
+    'k_remin': ('DetritusRemin', 'k_remin'),         # remineralisation rate [d-1]
+    'w_sink': ('DetritusSink', 'w_sink'),            # detritus sinking velocity [m d-1]
+    'm_Zlin': ('ZooLinMortality', 'rate'),           # linear zoo loss [d-1]
+    'graze_fD': ('GrazingRouter', 'frac_D'), 'graze_fX': ('GrazingRouter', 'frac_export'),
+    'zq_fD': ('ZooQuadMortality', 'frac_D'), 'zq_fX': ('ZooQuadMortality', 'frac_export'),
+    'pm_fD': ('PhytoMortality', 'frac_D'), 'pm_fX': ('PhytoMortality', 'frac_export'),
+}
+
 ERA_OF = lambda y: 'pre' if y < 2005 else ('post' if y < 2014 else 'recovery')
 GROUP_ERAS = {'pre': ['pre'], 'post': ['post'], 'recovery': ['recovery'],
               'pre+recovery': ['pre', 'recovery'], 'post+recovery': ['post', 'recovery']}
@@ -201,8 +213,10 @@ def _clim(r, spinup_yr):
 
 
 def run_one(construct, forcing, fish_rate=0.0, years=60, spinup=15, spline_s=0.0,
-            mP=None, m_Z=None, grazing=None, solver_kwargs=SEASONAL_SOLVER_KWARGS):
-    """One seasonal IVP. Growth = construct; mP / m_Z / grazing override the defaults."""
+            mP=None, m_Z=None, grazing=None, iv_overrides=None,
+            solver_kwargs=SEASONAL_SOLVER_KWARGS):
+    """One seasonal IVP. Growth = construct; mP / m_Z / grazing override the defaults;
+    iv_overrides = {slot: {param: val}} sets arbitrary closure/remin/routing params."""
     iv = make_seasonal_input_vars(
         forcing['fn'], forcing['de'], forcing['t'], fish_rate=fish_rate,
         mu_max=construct['mu_max'], halfsat=construct['halfsat'],
@@ -210,6 +224,8 @@ def run_one(construct, forcing, fish_rate=0.0, years=60, spinup=15, spline_s=0.0
         spline_s=spline_s)
     if grazing:
         iv['Grazing'].update(grazing)
+    for slot, d in (iv_overrides or {}).items():
+        iv[slot].update(d)
     time_ax = np.arange(0.0, years * 365.0 + 1.0, 1.0)
     setup = xso.setup(solver='solve_ivp', model=model_baseline_seasonal, time=time_ax,
                       input_vars=iv, output_vars=SLIM_OUTPUT_VARS, solver_kwargs=solver_kwargs)
@@ -261,10 +277,15 @@ def run_seasonal_scan(constructs=DEFAULT_CONSTRUCTS,
     records = []
     for i, (s, g, f, p) in enumerate(combos):
         mP, m_Z = p.get('mP'), p.get('m_Z')
-        grazing = {k: p[k] for k in p if k in ('KsZ', 'sigma_log')} or None
+        ivo = {}
+        for k, v in p.items():
+            if k in ('mP', 'm_Z'):
+                continue
+            slot, key = _PARAM_SLOT[k]
+            ivo.setdefault(slot, {})[key] = v
         try:
             m = run_one(s, forcings[g], fish_rate=f, years=years, spinup=spinup,
-                        spline_s=spline_s, mP=mP, m_Z=m_Z, grazing=grazing,
+                        spline_s=spline_s, mP=mP, m_Z=m_Z, iv_overrides=(ivo or None),
                         solver_kwargs=solver_kwargs)
             sc_med = score({k: m.get(k + '_med', np.nan) for k in SCORE_KEYS}, obs[g]['med'])
             sc_mean = score({k: m.get(k, np.nan) for k in SCORE_KEYS}, obs[g]['mean'])
