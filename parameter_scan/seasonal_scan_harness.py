@@ -37,6 +37,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 import xso
+from xso.parscans import run_parallel_tasks
 import parscan_utils_extended as pue
 from cariaco_obs import DEFAULT_CSV_PATH
 from baseline_r0_seasonal_comps import _build_fn_func
@@ -64,6 +65,7 @@ METRIC_KEYS = ['mcs', 'pico', 'nano', 'micro', 'Z200', 'Z500', 'sumP', 'N', 'PP'
 # args; everything below is applied as a post-build iv override.
 _PARAM_SLOT = {
     'KsZ': ('Grazing', 'KsZ'), 'sigma_log': ('Grazing', 'sigma_log'),
+    'GGE': ('GrazingRouter', 'gge'),                 # gross growth efficiency (Stock 0.25 default)
     'k_remin': ('DetritusRemin', 'k_remin'),         # remineralisation rate [d-1]
     'w_sink': ('DetritusSink', 'w_sink'),            # detritus sinking velocity [m d-1]
     'm_Zlin': ('ZooLinMortality', 'rate'),           # linear zoo loss [d-1]
@@ -148,6 +150,37 @@ def build_obs_targets(groups=('pre+recovery', 'post', 'recovery'), csv=DEFAULT_C
     return out
 
 
+def build_obs_monthly(groups=('pre+recovery', 'post', 'recovery'), csv=DEFAULT_CSV_PATH):
+    """Per-era RAW monthly obs rows -- the points behind the clouds / boxplots that
+    build_obs_targets only aggregates. Returns {group: DataFrame} with a 'mo' column
+    and each metric in native obs units; mcs / fractions / sumP are computed per month
+    from the composition columns exactly as _obs_fingerprint does (NaN where missing)."""
+    df = pd.read_csv(csv, parse_dates=['date'])
+    df['era'] = df['date'].dt.year.map(ERA_OF)
+    df['mo'] = df['date'].dt.month
+    binc = ['pico_mmolN', 'nano_mmolN', 'micro_mmolN']
+    out = {}
+    for g in groups:
+        d = df[df['era'].isin(GROUP_ERAS[g])]
+        A = d[binc].to_numpy(float)
+        tot = A.sum(1)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            fr = np.where(tot[:, None] > 0, A / tot[:, None], np.nan)
+        out[g] = pd.DataFrame({
+            'mo': d['mo'].to_numpy(),
+            'mcs': np.where(tot > 0, 10.0 ** (fr @ np.log10(GEOM)), np.nan),
+            'pico': fr[:, 0], 'nano': fr[:, 1], 'micro': fr[:, 2],
+            'sumP': np.where(tot > 0, tot, np.nan),
+            'N': d['NO3_mmolN'].to_numpy(),
+            'PP': d['PP_mmolN_m3_d'].to_numpy(),
+            'Export': d['export_flux_corrected_mmolN'].to_numpy(),
+            'Z200': d['zoo_gt200_mmolN'].to_numpy(),
+            'Z500': d['zoo_gt500_mmolN'].to_numpy(),
+            'FN': d['FN_mmolN_m2_d'].to_numpy(),
+        })
+    return out
+
+
 # =============================================================================
 # Run + reduce one seasonal IVP -> dynamical long-run summary
 # =============================================================================
@@ -214,9 +247,12 @@ def _clim(r, spinup_yr):
 
 def run_one(construct, forcing, fish_rate=0.0, years=60, spinup=15, spline_s=0.0,
             mP=None, m_Z=None, grazing=None, iv_overrides=None,
-            solver_kwargs=SEASONAL_SOLVER_KWARGS):
+            solver_kwargs=SEASONAL_SOLVER_KWARGS, return_traj=False):
     """One seasonal IVP. Growth = construct; mP / m_Z / grazing override the defaults;
-    iv_overrides = {slot: {param: val}} sets arbitrary closure/remin/routing params."""
+    iv_overrides = {slot: {param: val}} sets arbitrary closure/remin/routing params.
+    return_traj=True returns (clim, r) keeping the full post-reduce trajectory r
+    (metric time series + forcing FN(t)/de(t)/T(t) attached) for diagnostics; default
+    returns the clim summary only, so the scan path is byte-identical."""
     iv = make_seasonal_input_vars(
         forcing['fn'], forcing['de'], forcing['t'], fish_rate=fish_rate,
         mu_max=construct['mu_max'], halfsat=construct['halfsat'],
@@ -234,7 +270,13 @@ def run_one(construct, forcing, fish_rate=0.0, years=60, spinup=15, spline_s=0.0
     if 'Export' in r:                                # per-volume rate -> areal flux (= w_sink*D)
         de_t = _build_fn_func(forcing['de'], PERIOD, SPLINE_K, spline_s)(r['t'])
         r['Export'] = r['Export'] * de_t
-    return _clim(r, spinup)
+    clim = _clim(r, spinup)
+    if return_traj:                                  # attach forcing series for diagnostics
+        r['FN'] = _build_fn_func(forcing['fn'], PERIOD, SPLINE_K, spline_s)(r['t'])
+        r['de'] = _build_fn_func(forcing['de'], PERIOD, SPLINE_K, spline_s)(r['t'])
+        r['T'] = _build_fn_func(forcing['t'], PERIOD, SPLINE_K, spline_s)(r['t'])
+        return clim, r
+    return clim
 
 
 # =============================================================================
@@ -254,14 +296,24 @@ def score(model_vals, obs_vals, weights=None):
 # =============================================================================
 # Scan driver (incremental save) + result wrapper
 # =============================================================================
+def _seasonal_worker(kw):
+    """One combo -> run_one's _clim summary dict (carries has_nan for NaN-terminated
+    runs). A genuine exception propagates; run_parallel_tasks' worker wrapper catches
+    it and returns an error sentinel, so the pool keeps going."""
+    return run_one(**kw)
+
+
 def run_seasonal_scan(constructs=DEFAULT_CONSTRUCTS,
                       groups=('pre+recovery', 'post', 'recovery'),
                       fish_rates=(0.0,), param_grid=None, years=60, spinup=15,
                       spline_s=0.0, solver_kwargs=SEASONAL_SOLVER_KWARGS,
-                      save_path='seasonal_scan_results.pkl', progress=True):
-    """Cartesian product (construct x group x fish x param_grid) of seasonal IVPs.
+                      save_path='seasonal_scan_results.pkl', progress=True,
+                      processes=None):
+    """Cartesian product (construct x group x fish x param_grid) of seasonal IVPs,
+    run in parallel across `processes` workers (default os.cpu_count()-1).
     `param_grid` = {param: [values]} where param in {'mP','m_Z','KsZ','sigma_log'}.
-    score = max(model-mean-vs-obs-mean, model-median-vs-obs-median). Saves each run."""
+    score = max(model-mean-vs-obs-mean, model-median-vs-obs-median). Each completed
+    run is appended + re-pickled from the parent (single writer)."""
     forcings = build_forcings(groups)
     obs = build_obs_targets(groups)
     specs = [allometry(c) if isinstance(c, str) else c for c in constructs]
@@ -270,23 +322,33 @@ def run_seasonal_scan(constructs=DEFAULT_CONSTRUCTS,
         if pnames else [{}]
     combos = [(s, g, f, p) for s in specs for g in groups for f in fish_rates for p in pgrid]
     n = len(combos)
-    t0 = time.time()
-    print(f"[seasonal scan] {n} runs: {[s['name'] for s in specs]} x {list(groups)} x "
-          f"fish={list(fish_rates)} x params{pnames or '[]'} | {years} yr each (spin-up {spinup})")
-    print(f"solver: {solver_kwargs} | spline_s={spline_s}")
-    records = []
-    for i, (s, g, f, p) in enumerate(combos):
-        mP, m_Z = p.get('mP'), p.get('m_Z')
+
+    # resolve one combo -> run_one kwargs (mP/m_Z direct; the rest -> iv_overrides)
+    def _kwargs(s, g, f, p):
         ivo = {}
         for k, v in p.items():
             if k in ('mP', 'm_Z'):
                 continue
             slot, key = _PARAM_SLOT[k]
             ivo.setdefault(slot, {})[key] = v
-        try:
-            m = run_one(s, forcings[g], fish_rate=f, years=years, spinup=spinup,
-                        spline_s=spline_s, mP=mP, m_Z=m_Z, iv_overrides=(ivo or None),
-                        solver_kwargs=solver_kwargs)
+        return dict(construct=s, forcing=forcings[g], fish_rate=f, years=years,
+                    spinup=spinup, spline_s=spline_s, mP=p.get('mP'), m_Z=p.get('m_Z'),
+                    iv_overrides=(ivo or None), solver_kwargs=solver_kwargs)
+
+    tasks = [(_kwargs(s, g, f, p),) for (s, g, f, p) in combos]   # 1-tuple per task
+
+    t0 = time.time()
+    print(f"[seasonal scan] {n} runs: {[s['name'] for s in specs]} x {list(groups)} x "
+          f"fish={list(fish_rates)} x params{pnames or '[]'} | {years} yr each (spin-up {spinup})")
+    print(f"solver: {solver_kwargs} | spline_s={spline_s} | processes={processes or 'cpu-1'}")
+
+    records = []
+
+    # parent-side, single writer: score + assemble + incremental save + rich line
+    def on_result(item, done, n):
+        s, g, f, p = combos[item['index']]
+        if item['ok']:
+            m = item['result']
             sc_med = score({k: m.get(k + '_med', np.nan) for k in SCORE_KEYS}, obs[g]['med'])
             sc_mean = score({k: m.get(k, np.nan) for k in SCORE_KEYS}, obs[g]['mean'])
             sc = float(np.nanmax([sc_med, sc_mean])) if np.isfinite([sc_med, sc_mean]).all() else np.nan
@@ -295,10 +357,9 @@ def run_seasonal_scan(constructs=DEFAULT_CONSTRUCTS,
             for k in obs[g]['med']:
                 rec[f'obs_{k}_med'] = obs[g]['med'][k]
                 rec[f'obs_{k}_mean'] = obs[g]['mean'][k]
-        except Exception as e:
+        else:
             rec = dict(construct=s['name'], group=g, fish=float(f), **p,
-                       score=np.inf, has_nan=True, error=str(e))
-            print(f"  [warn] {s['name']}|{g}|fish={f}|{p}: {e}")
+                       score=np.inf, has_nan=True, error=item['error'])
         records.append(rec)
         if save_path:
             with open(save_path, 'wb') as fh:
@@ -306,12 +367,19 @@ def run_seasonal_scan(constructs=DEFAULT_CONSTRUCTS,
                                  param_names=pnames), fh)
         if progress:
             el = time.time() - t0
-            print(f"  {i+1:3d}/{n} {s['name']:13s} {g:13s} fish={f:<4g} {p} "
+            print(f"  {done:3d}/{n} {s['name']:13s} {g:13s} fish={f:<4g} {p} "
                   f"mcs={rec.get('mcs', np.nan):5.2f}/{rec.get('mcs_med', np.nan):5.2f} "
                   f"micro={rec.get('micro', np.nan):4.2f} Z200pk={rec.get('Z200_peak', np.nan):5.3f} "
                   f"conv={rec.get('mcs_conv', np.nan):4.2f} nan={rec.get('has_nan')} "
                   f"score={rec.get('score', np.nan):5.2f} | {el/60:4.1f}m "
-                  f"ETA {el/(i+1)*(n-i-1)/60:4.1f}m", flush=True)
+                  f"ETA {el/done*(n-done)/60:4.1f}m", flush=True)
+
+    # driver prints errors + the end summary (with has_nan tally); our rich line
+    # above is the per-combo detail, so the driver's generic line is off.
+    run_parallel_tasks(_seasonal_worker, tasks, processes=processes,
+                       on_result=on_result, progress=False,
+                       tally_flags=['has_nan'], label='seasonal')
+
     return SeasonalScanResult(records, obs, forcings, pnames)
 
 
