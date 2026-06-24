@@ -40,10 +40,10 @@ import xso
 from xso.parscans import run_parallel_tasks
 import parscan_utils_extended as pue
 from cariaco_obs import DEFAULT_CSV_PATH
-from baseline_r0_seasonal_comps import _build_fn_func
+from baseline_r0_seasonal_comps import _build_fourier_func
 from baseline_r0_seasonal_setups import (
     model_baseline_seasonal, make_seasonal_input_vars,
-    SLIM_OUTPUT_VARS, IVP_SOLVER_KWARGS, SPLINE_K,
+    SLIM_OUTPUT_VARS, IVP_SOLVER_KWARGS, N_HARMONICS,
 )
 from baseline_r0_setups import phyto_esd, M_P, M_Z_BULK
 
@@ -278,19 +278,19 @@ def _clim(r, spinup_yr):
     return s
 
 
-def run_one(construct, forcing, fish_rate=0.0, years=60, spinup=15, spline_s=0.0,
+def run_one(construct, forcing, fish_rate=0.0, years=60, spinup=15,
             mP=None, m_Z=None, grazing=None, iv_overrides=None,
             solver_kwargs=SEASONAL_SOLVER_KWARGS, return_traj=False):
     """One seasonal IVP. Growth = construct; mP / m_Z / grazing override the defaults;
     iv_overrides = {slot: {param: val}} sets arbitrary closure/remin/routing params.
     return_traj=True returns (clim, r) keeping the full post-reduce trajectory r
     (metric time series + forcing FN(t)/de(t)/T(t) attached) for diagnostics; default
-    returns the clim summary only, so the scan path is byte-identical."""
+    returns the clim summary only, so the scan path is byte-identical.
+    Forcing interpolation = 2-harmonic Fourier fit (replaced cubic spline, 2026-06-24)."""
     iv = make_seasonal_input_vars(
         forcing['fn'], forcing['de'], forcing['t'], fish_rate=fish_rate,
         mu_max=construct['mu_max'], halfsat=construct['halfsat'],
-        mP=(M_P if mP is None else mP), m_Z=(M_Z_BULK if m_Z is None else m_Z),
-        spline_s=spline_s)
+        mP=(M_P if mP is None else mP), m_Z=(M_Z_BULK if m_Z is None else m_Z))
     if grazing:
         iv['Grazing'].update(grazing)
     for slot, d in (iv_overrides or {}).items():
@@ -301,13 +301,13 @@ def run_one(construct, forcing, fish_rate=0.0, years=60, spinup=15, spline_s=0.0
     out = pue.run_single_point(model_baseline_seasonal, setup, {})
     r = _reduce(out)
     if 'Export' in r:                                # per-volume rate -> areal flux (= w_sink*D)
-        de_t = _build_fn_func(forcing['de'], PERIOD, SPLINE_K, spline_s)(r['t'])
+        de_t = _build_fourier_func(forcing['de'], PERIOD, N_HARMONICS)(r['t'])
         r['Export'] = r['Export'] * de_t
     clim = _clim(r, spinup)
     if return_traj:                                  # attach forcing series for diagnostics
-        r['FN'] = _build_fn_func(forcing['fn'], PERIOD, SPLINE_K, spline_s)(r['t'])
-        r['de'] = _build_fn_func(forcing['de'], PERIOD, SPLINE_K, spline_s)(r['t'])
-        r['T'] = _build_fn_func(forcing['t'], PERIOD, SPLINE_K, spline_s)(r['t'])
+        r['FN'] = _build_fourier_func(forcing['fn'], PERIOD, N_HARMONICS)(r['t'])
+        r['de'] = _build_fourier_func(forcing['de'], PERIOD, N_HARMONICS)(r['t'])
+        r['T'] = _build_fourier_func(forcing['t'], PERIOD, N_HARMONICS)(r['t'])
         return clim, r
     return clim
 
@@ -339,14 +339,15 @@ def _seasonal_worker(kw):
 def run_seasonal_scan(constructs=DEFAULT_CONSTRUCTS,
                       groups=('pre+recovery', 'post', 'recovery'),
                       fish_rates=(0.0,), param_grid=None, years=60, spinup=15,
-                      spline_s=0.0, solver_kwargs=SEASONAL_SOLVER_KWARGS,
+                      solver_kwargs=SEASONAL_SOLVER_KWARGS,
                       save_path='seasonal_scan_results.pkl', progress=True,
                       processes=None):
     """Cartesian product (construct x group x fish x param_grid) of seasonal IVPs,
     run in parallel across `processes` workers (default os.cpu_count()-1).
     `param_grid` = {param: [values]} where param in {'mP','m_Z','KsZ','sigma_log'}.
     score = max(model-mean-vs-obs-mean, model-median-vs-obs-median). Each completed
-    run is appended + re-pickled from the parent (single writer)."""
+    run is appended + re-pickled from the parent (single writer).
+    Forcing interpolation = 2-harmonic Fourier (replaced spline_s arg, 2026-06-24)."""
     forcings = build_forcings(groups)
     obs = build_obs_targets(groups)
     specs = [allometry(c) if isinstance(c, str) else c for c in constructs]
@@ -365,7 +366,7 @@ def run_seasonal_scan(constructs=DEFAULT_CONSTRUCTS,
             slot, key = _PARAM_SLOT[k]
             ivo.setdefault(slot, {})[key] = v
         return dict(construct=s, forcing=forcings[g], fish_rate=f, years=years,
-                    spinup=spinup, spline_s=spline_s, mP=p.get('mP'), m_Z=p.get('m_Z'),
+                    spinup=spinup, mP=p.get('mP'), m_Z=p.get('m_Z'),
                     iv_overrides=(ivo or None), solver_kwargs=solver_kwargs)
 
     tasks = [(_kwargs(s, g, f, p),) for (s, g, f, p) in combos]   # 1-tuple per task
@@ -373,7 +374,7 @@ def run_seasonal_scan(constructs=DEFAULT_CONSTRUCTS,
     t0 = time.time()
     print(f"[seasonal scan] {n} runs: {[s['name'] for s in specs]} x {list(groups)} x "
           f"fish={list(fish_rates)} x params{pnames or '[]'} | {years} yr each (spin-up {spinup})")
-    print(f"solver: {solver_kwargs} | spline_s={spline_s} | processes={processes or 'cpu-1'}")
+    print(f"solver: {solver_kwargs} | fourier n_harm={N_HARMONICS} | processes={processes or 'cpu-1'}")
 
     records = []
 

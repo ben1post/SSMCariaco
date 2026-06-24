@@ -8,11 +8,11 @@ is published by one component and foreign-referenced by its consumers — exactl
 `temperature` already reaches MonodGrowth_T / DistributedGrazing_TypeIII_T):
 
 - SeasonalForcing : a pure forcing provider (no flux). Owns the seasonal F_N(t), d_e(t)
-  and T(t) as INDEPENDENT periodic splines, each through its own 12 calendar-month obs
-  means (EMPOWER / Anderson et al. 2015 pattern: per=True spline evaluated at
-  np.mod(t, period)). d_e(t) and T(t) are forced DIRECTLY from the obs era climatologies
-  (no longer derived from F_N — the F_N->d_e/T regression matched the annual mean but
-  compressed the bloom-season amplitude; 2026-06-22). Publishes three forcings:
+  and T(t) as INDEPENDENT truncated Fourier fits (n_harmonics=2: annual + semi-annual
+  cycle), each through its own 12 calendar-month obs means. Replaced the EMPOWER-style
+  periodic cubic spline (2026-06-24) to eliminate Runge-type wiggle overshoot; standard
+  in physical oceanography. d_e(t) and T(t) are forced DIRECTLY from the obs era
+  climatologies (no longer derived from F_N; 2026-06-22). Publishes three forcings:
   fn (label 'fn'), de (label 'de'), temperature (label 'temperature').
 - SeasonalNutrientSupply : the Stock (2008) supply flux J = F_N(t)/d_e(t) -> N,
   foreign-referencing the fn and de forcings.
@@ -23,9 +23,10 @@ is published by one component and foreign-referenced by its consumers — exactl
 Growth and grazing are UNCHANGED: they already foreign-reference the 'temperature'
 forcing, now supplied by SeasonalForcing instead of ConstantTemperatureForcing.
 
-Forcing-construction pattern verbatim from the EMPOWER XSO implementation
-(forcings.py, StationForcingFromFile.read_intrp_forcing): scipy splrep(..., per=True)
-through mid-month day positions with a wrap boundary, evaluated at np.mod(t, period).
+Forcing construction: truncated Fourier fit (default n_harmonics=2) at the 12 mid-month
+DOY positions, evaluated via np.mod(t, period). Replaced the EMPOWER-style periodic cubic
+spline (2026-06-24) which suffered Runge-type overshoot between monthly points.
+The legacy _build_fn_func is retained for diagnostic comparisons.
 """
 
 import numpy as np
@@ -39,10 +40,9 @@ _MID_MONTH_DOY = np.cumsum(_DPM) - _DPM / 2.0     # 15.5, 45.0, ..., 350.5
 
 
 def _build_fn_func(fn_monthly, period, spline_k, spline_s):
-    """Periodic spline F_N(t) through the 12 monthly means (EMPOWER pattern), floored
-    at 0 to guard against spline undershoot. MODULE-LEVEL (not a component method):
-    XSO only carries registered setup_func methods onto the rebuilt component, so the
-    forcing setup_funcs call this directly rather than via self."""
+    """LEGACY — periodic cubic spline F_N(t) through 12 monthly means.
+    Retained for reference / diagnostic comparisons. Production forcing now uses
+    _build_fourier_func (2-harmonic Fourier fit; 2026-06-24)."""
     fn_monthly = np.asarray(fn_monthly, dtype=float)
     per = float(period)
     x = np.concatenate([[0.0], _MID_MONTH_DOY, [per]])
@@ -55,18 +55,55 @@ def _build_fn_func(fn_monthly, period, spline_k, spline_s):
     return fn_of_t
 
 
+def _build_fourier_func(monthly, period, n_harmonics=2):
+    """Truncated Fourier (harmonic) fit through 12 monthly values, evaluated as a
+    periodic function of continuous time.  Replaces _build_fn_func (2026-06-24).
+
+        y(t) = a_0 + Σ_{k=1}^{n} [ a_k cos(2πkt/T) + b_k sin(2πkt/T) ]
+
+    Least-squares fit at the 12 mid-month DOY positions.  Inherently smooth and
+    periodic — no Runge-type overshoot, no free smoothing parameter.  Standard in
+    physical oceanography (annual + semi-annual = 2 harmonics).  Floored at 0 for
+    variables that must be non-negative (F_N, d_e).
+
+    MODULE-LEVEL (not a component method): XSO only carries registered setup_func
+    methods onto the rebuilt component, so the forcing setup_funcs call this directly.
+    """
+    monthly = np.asarray(monthly, dtype=float)
+    per = float(period)
+    n = int(n_harmonics)
+    t_pts = _MID_MONTH_DOY
+    ncols = 1 + 2 * n
+    A = np.ones((12, ncols))
+    for k in range(1, n + 1):
+        A[:, 2*k - 1] = np.cos(2 * np.pi * k * t_pts / per)
+        A[:, 2*k]     = np.sin(2 * np.pi * k * t_pts / per)
+    coeffs, _, _, _ = np.linalg.lstsq(A, monthly, rcond=None)
+
+    def fn_of_t(t):
+        t_mod = np.mod(t, per)
+        val = np.full_like(np.atleast_1d(t_mod), coeffs[0], dtype=float)
+        for k in range(1, n + 1):
+            val += coeffs[2*k - 1] * np.cos(2 * np.pi * k * t_mod / per)
+            val += coeffs[2*k]     * np.sin(2 * np.pi * k * t_mod / per)
+        result = np.maximum(val, 0.0)
+        return float(result) if np.ndim(t) == 0 else result
+    return fn_of_t
+
+
 @xso.component
 class SeasonalForcing:
-    """Seasonal forcing provider: F_N(t), d_e(t), T(t) as independent periodic splines.
+    """Seasonal forcing provider: F_N(t), d_e(t), T(t) as independent Fourier fits.
 
-        F_N(t) = periodic spline through the 12 calendar-month F_N obs means (>= 0)
-        d_e(t) = periodic spline through the 12 calendar-month d_e obs means
-        T(t)   = periodic spline through the 12 calendar-month T  obs means
+        F_N(t) = 2-harmonic Fourier fit through the 12 calendar-month F_N obs means (>= 0)
+        d_e(t) = 2-harmonic Fourier fit through the 12 calendar-month d_e obs means (>= 0)
+        T(t)   = 2-harmonic Fourier fit through the 12 calendar-month T  obs means
 
-    Pure forcing component (no flux / no state variable). d_e(t) and T(t) are forced
-    DIRECTLY from their obs climatologies (not derived from F_N; 2026-06-22). The three
-    forcings are published under labels (fn_label / de_label / temperature_label) for
-    SeasonalNutrientSupply, DetritusSinking_seasonal, and MonodGrowth_T /
+    Pure forcing component (no flux / no state variable). Replaced periodic cubic spline
+    with truncated Fourier fit (2026-06-24) to eliminate Runge-type overshoot. d_e(t) and
+    T(t) are forced DIRECTLY from their obs climatologies (not derived from F_N; 2026-06-22).
+    The three forcings are published under labels (fn_label / de_label / temperature_label)
+    for SeasonalNutrientSupply, DetritusSinking_seasonal, and MonodGrowth_T /
     DistributedGrazing_TypeIII_T to foreign-reference.
     """
     month = xso.index(dims='month', as_parameter=True,
@@ -74,9 +111,8 @@ class SeasonalForcing:
     fn_monthly = xso.parameter(dims='month',
                                description='12 calendar-month mean F_N [mmol N m-2 d-1]')
 
-    period   = xso.parameter(description='forcing period [d] (365)')
-    spline_k = xso.parameter(description='periodic spline degree (1 linear / 3 cubic)')
-    spline_s = xso.parameter(description='periodic spline smoothing s (0 = interpolate)')
+    period       = xso.parameter(description='forcing period [d] (365)')
+    n_harmonics  = xso.parameter(description='number of Fourier harmonics (default 2 = annual + semi-annual)')
 
     de_monthly = xso.parameter(dims='month',
                                description='12 calendar-month mean d_e [m] (forced directly from obs)')
@@ -90,14 +126,14 @@ class SeasonalForcing:
     temperature = xso.forcing(setup_func='make_temperature',
                               description='seasonal box temperature T(t) [°C]')
 
-    def make_fn(self, fn_monthly, period, spline_k, spline_s):
-        return _build_fn_func(fn_monthly, period, spline_k, spline_s)
+    def make_fn(self, fn_monthly, period, n_harmonics):
+        return _build_fourier_func(fn_monthly, period, n_harmonics)
 
-    def make_de(self, de_monthly, period, spline_k, spline_s):
-        return _build_fn_func(de_monthly, period, spline_k, spline_s)
+    def make_de(self, de_monthly, period, n_harmonics):
+        return _build_fourier_func(de_monthly, period, n_harmonics)
 
-    def make_temperature(self, t_monthly, period, spline_k, spline_s):
-        return _build_fn_func(t_monthly, period, spline_k, spline_s)
+    def make_temperature(self, t_monthly, period, n_harmonics):
+        return _build_fourier_func(t_monthly, period, n_harmonics)
 
 
 @xso.component

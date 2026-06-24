@@ -45,10 +45,13 @@ from baseline_r0_setups import (
 DE_COEFFS = (55.89, 3.966, 19.0, 69.0)   # (intercept, slope, lo, hi)  d_e = clip(a - b*F_N)
 T_COEFFS  = (25.64, 0.414, 22.0, 29.0)   # (intercept, slope, lo, hi)  T   = clip(a - b*F_N)
 
-# Spline defaults: cubic periodic, interpolating through the 12 monthly means.
+# Fourier forcing defaults (replaced cubic spline, 2026-06-24).
+N_HARMONICS = 2   # annual + semi-annual cycle; standard in physical oceanography
+PERIOD      = 365.0
+
+# Legacy spline constants kept for diagnostic comparisons only.
 SPLINE_K = 3
 SPLINE_S = 0.0
-PERIOD   = 365.0
 
 
 # =============================================================================
@@ -79,7 +82,7 @@ model_baseline_seasonal = xso.create({
 def make_seasonal_input_vars(fn_monthly, de_monthly, t_monthly, fish_rate=FISH_RATE,
                              mu_max=mu_max_arr, halfsat=ks_arr,
                              mP=M_P, m_Z=M_Z_BULK,
-                             period=PERIOD, spline_k=SPLINE_K, spline_s=SPLINE_S):
+                             period=PERIOD, n_harmonics=N_HARMONICS):
     """Input-vars for model_baseline_seasonal.
 
     Starts from make_baseline_input_vars (all the SS defaults: growth allometry,
@@ -87,8 +90,9 @@ def make_seasonal_input_vars(fn_monthly, de_monthly, t_monthly, fish_rate=FISH_R
     removes the constant Temperature slot, replaces Inflow with the seasonal supply,
     and adds the SeasonalForcing slot carrying the 12-month F_N, d_e and T obs
     climatologies (d_e/T forced DIRECTLY from obs, no longer derived from F_N;
-    2026-06-22). DetritusSink's `de` reference is unchanged (label 'de' now resolves
-    to the seasonal d_e(t) forcing).
+    2026-06-22). Forcing interpolation = truncated Fourier fit (n_harmonics=2,
+    annual + semi-annual; replaced cubic spline 2026-06-24). DetritusSink's `de`
+    reference is unchanged (label 'de' now resolves to the seasonal d_e(t) forcing).
 
     Override mu_max / halfsat for a different growth allometry (e.g. Marañón+Ward);
     set grazing K_sZ / sigma by editing iv['Grazing']['KsZ'] / ['sigma_log'] on the
@@ -104,7 +108,7 @@ def make_seasonal_input_vars(fn_monthly, de_monthly, t_monthly, fish_rate=FISH_R
         'de_monthly': np.asarray(de_monthly, dtype=float),
         't_monthly':  np.asarray(t_monthly,  dtype=float),
         'fn_label': 'fn', 'de_label': 'de', 'temperature_label': 'temperature',
-        'period': float(period), 'spline_k': int(spline_k), 'spline_s': float(spline_s),
+        'period': float(period), 'n_harmonics': int(n_harmonics),
     }
     iv['Inflow'] = {'var': 'N', 'fn': 'fn', 'de': 'de'}
     return iv
@@ -127,5 +131,6 @@ _PLACEHOLDER_T_MONTHLY  = np.clip(_t_a  - _t_b  * _PLACEHOLDER_FN_MONTHLY, _t_lo
 setup_baseline_seasonal_slim = xso.setup(
     solver='solve_ivp', model=model_baseline_seasonal, time=seasonal_time,
     input_vars=make_seasonal_input_vars(_PLACEHOLDER_FN_MONTHLY,
-                                        _PLACEHOLDER_DE_MONTHLY, _PLACEHOLDER_T_MONTHLY),
+                                        _PLACEHOLDER_DE_MONTHLY, _PLACEHOLDER_T_MONTHLY,
+                                        n_harmonics=N_HARMONICS),
     output_vars=SLIM_OUTPUT_VARS, solver_kwargs=IVP_SOLVER_KWARGS)
