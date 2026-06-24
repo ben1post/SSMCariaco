@@ -109,6 +109,7 @@ def make_seasonal_input_vars(fn_monthly, de_monthly, t_monthly, fish_rate=FISH_R
         't_monthly':  np.asarray(t_monthly,  dtype=float),
         'fn_label': 'fn', 'de_label': 'de', 'temperature_label': 'temperature',
         'period': float(period), 'n_harmonics': int(n_harmonics),
+        'fn_scale': 1.0,   # added 2026-06-25; sweep via param_name='Forcing__fn_scale'
     }
     iv['Inflow'] = {'var': 'N', 'fn': 'fn', 'de': 'de'}
     return iv
@@ -134,3 +135,20 @@ setup_baseline_seasonal_slim = xso.setup(
                                         _PLACEHOLDER_DE_MONTHLY, _PLACEHOLDER_T_MONTHLY,
                                         n_harmonics=N_HARMONICS),
     output_vars=SLIM_OUTPUT_VARS, solver_kwargs=IVP_SOLVER_KWARGS)
+
+# Tight-tolerance slim variant for seasonal 2D parameter scans (added 2026-06-25).
+# Mirrors setup_baseline_slim_tight (SS variant). Tight RK45 tols suppress the
+# Marañón+Ward limit-cycle trough overshoots (21/49 → 0/49 in the 7×7 test);
+# default neg floor (-1e-3) preserved as a backstop. F_N is swept via
+# Forcing__fn_scale (a scalar multiplier on fn_monthly, applied before the Fourier
+# fit — zero hot-path overhead, see SeasonalForcing in baseline_r0_seasonal_comps).
+# fn_scale defaults to 1.0 (identity) so this setup behaves identically to
+# setup_baseline_seasonal_slim until fn_scale is overridden at scan time.
+setup_baseline_seasonal_slim_tight = xso.setup(
+    solver='solve_ivp', model=model_baseline_seasonal, time=seasonal_time,
+    input_vars=make_seasonal_input_vars(_PLACEHOLDER_FN_MONTHLY,
+                                        _PLACEHOLDER_DE_MONTHLY, _PLACEHOLDER_T_MONTHLY,
+                                        n_harmonics=N_HARMONICS),
+    output_vars=SLIM_OUTPUT_VARS,
+    solver_kwargs={'method': 'RK45', 'atol': 1e-9, 'rtol': 1e-6,
+                   'max_step': 1.0, 'instability_neg_threshold': -1e-3})

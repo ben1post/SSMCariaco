@@ -114,6 +114,16 @@ class SeasonalForcing:
     period       = xso.parameter(description='forcing period [d] (365)')
     n_harmonics  = xso.parameter(description='number of Fourier harmonics (default 2 = annual + semi-annual)')
 
+    # Scalar F_N multiplier for parameter scans (added 2026-06-25). Applied to
+    # fn_monthly BEFORE the Fourier fit -- because the fit is linear in the data,
+    # Fourier(c*monthly) = c*Fourier(monthly), so the coefficients carry the
+    # scaling and the forcing closure (called per solver step) has zero hot-path
+    # overhead. Default 1.0 = identity (existing behaviour).
+    fn_scale = xso.parameter(
+        description='F_N forcing scale multiplier [dimensionless]; multiplies '
+                    'fn_monthly before the Fourier fit (zero hot-path cost). '
+                    'Default 1.0; sweep via SeasonalForcing__fn_scale for 2D parscans.')
+
     de_monthly = xso.parameter(dims='month',
                                description='12 calendar-month mean d_e [m] (forced directly from obs)')
     t_monthly  = xso.parameter(dims='month',
@@ -126,8 +136,9 @@ class SeasonalForcing:
     temperature = xso.forcing(setup_func='make_temperature',
                               description='seasonal box temperature T(t) [°C]')
 
-    def make_fn(self, fn_monthly, period, n_harmonics):
-        return _build_fourier_func(fn_monthly, period, n_harmonics)
+    def make_fn(self, fn_monthly, period, n_harmonics, fn_scale):
+        return _build_fourier_func(np.asarray(fn_monthly) * float(fn_scale),
+                                   period, n_harmonics)
 
     def make_de(self, de_monthly, period, n_harmonics):
         return _build_fourier_func(de_monthly, period, n_harmonics)
