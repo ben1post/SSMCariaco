@@ -108,6 +108,8 @@ def diagnostic_print(clim, group, obs_targets, obs_monthly, metrics=PRINT_METRIC
     print(f"flags   has_nan={nan} nan_frac={clim.get('nan_frac', 0.0):.2f} "
           f"mcs_conv={clim.get('mcs_conv', np.nan):.2f} Z200_peak={clim.get('Z200_peak', np.nan):.3f} "
           f"cv_sumP={clim.get('cv_sumP', np.nan):.2f}")
+    print(f"        floor   minP={clim.get('minP', np.nan):.4f}  minZ={clim.get('minZ', np.nan):.4f}"
+          f"   (post-spin-up min over classes; nearer 0 = more margin from the -1e-2 floor)")
     print(f"        mcs_peak month  model={pk_mod}  obs={pk_obs}  offset={off}")
     return dict(score_mean=sc_mean, score_med=sc_med, joint=joint, peak_offset=off)
 
@@ -202,3 +204,57 @@ def diagnose(clim, r, group, spinup, obs_targets, obs_monthly, title=''):
         plot_fn_loop(r, group, obs_monthly, spinup)
     plt.show()
     return summ
+
+
+def survey(res, obs_monthly, dur_thresh=5.0):
+    """Multi-criterion screen over a scan's stored records -- one row per
+    (param-combo, pre_fish), paired with the graded post (post fish <= pre fish;
+    joint = max(pre, post) composition score). Columns:
+      joint / pre_sc : composition fit (lower better)
+      bloom_rmse     : per-month log10(mcs) distance, model pre cycle vs obs pre cycle (lower=better)
+      pre/post_amp   : MCS seasonal amplitude (peak - trough of clim_mcs)
+      pre/post_dur   : months with clim_mcs > dur_thresh (length of the large-cell season)
+      *_contr        : pre - post (the era contrast to show)
+      pre/post_Z200  : large-Z, judged by direction not magnitude (net-tow caveat)
+    Robustness (minP/minZ) is NOT here -- older pickles lack it; re-run the shortlist
+    through diagnose(), which now prints the floor margin."""
+    PARAMS = list(res.param_names)
+    obs = {g: obs_monthly[g].dropna(subset=['mcs']).groupby('mo')['mcs'].median().reindex(_MO).values
+           for g in ('pre+recovery', 'post')}
+    log_obs_pre = np.log10(obs['pre+recovery'])
+    amp = lambda c: float(np.nanmax(c) - np.nanmin(c))
+    dur = lambda c: int(np.nansum(np.asarray(c) > dur_thresh))
+
+    recs = [r for r in res.records if not r.get('has_nan')]
+    pkey = lambda r: tuple(round(float(r[p]), 6) for p in PARAMS)
+    R = {(pkey(r), r['group'], float(r['fish'])): r for r in recs}
+    combos = sorted({pkey(r) for r in recs})
+
+    rows = []
+    for pc in combos:
+        pf_list = sorted({f for (p, g, f) in R if p == pc and g == 'pre+recovery'})
+        qf_list = sorted({f for (p, g, f) in R if p == pc and g == 'post'})
+        for pf in pf_list:
+            rp = R[(pc, 'pre+recovery', pf)]
+            best = None
+            for qf in qf_list:
+                if qf <= pf:
+                    j = max(rp['score'], R[(pc, 'post', qf)]['score'])
+                    if best is None or j < best[0]:
+                        best = (j, R[(pc, 'post', qf)])
+            if best is None:
+                continue
+            joint, rq = best
+            cpre, cpost = np.asarray(rp['clim_mcs'], float), np.asarray(rq['clim_mcs'], float)
+            rmse = float(np.sqrt(np.nanmean((np.log10(cpre) - log_obs_pre) ** 2)))
+            rows.append({**dict(zip(PARAMS, pc)),
+                         'pre_fish': pf, 'post_fish': float(rq['fish']),
+                         'joint': round(joint, 3), 'pre_sc': round(rp['score'], 3),
+                         'bloom_rmse': round(rmse, 3),
+                         'pre_amp': round(amp(cpre), 1), 'post_amp': round(amp(cpost), 1),
+                         'amp_contr': round(amp(cpre) - amp(cpost), 1),
+                         'pre_dur': dur(cpre), 'post_dur': dur(cpost),
+                         'dur_contr': dur(cpre) - dur(cpost),
+                         'pre_mcsmed': round(rp['mcs_med'], 2),
+                         'pre_Z200': round(rp['Z200_med'], 3), 'post_Z200': round(rq['Z200_med'], 3)})
+    return pd.DataFrame(rows)

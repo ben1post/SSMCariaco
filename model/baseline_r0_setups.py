@@ -322,6 +322,19 @@ setup_baseline_slim = xso.setup(
     input_vars=make_baseline_input_vars(), output_vars=SLIM_OUTPUT_VARS,
     solver_kwargs=IVP_SOLVER_KWARGS)
 
+# Tight-tolerance slim variant for SS 2D parameter scans (added 2026-06-24).
+# Smoke-test motivation: at the default IVP_SOLVER_KWARGS (atol=1e-6, rtol=1e-4),
+# the Marañón+Ward construct (mP=0.0015, m_Z=0.1, KsZ=0.23, σ=0.20, GGE=0.31) at
+# the pre+rec SS operating point (FN=2.94, r_F=0.4, de=50, T=20) integrated to a
+# clean equilibrium (mcs/ΣP/ΣZ tail-SDs ~1e-3) but NaN-terminated at t=4877 d on a
+# noise-floor overshoot in a near-zero state. atol=1e-9 + max_step=1.0 suppresses
+# the artefact. Per Benny norm: solver settings spelled out inline (no helper).
+setup_baseline_slim_tight = xso.setup(
+    solver='solve_ivp', model=model_baseline, time=ivp_time_array,
+    input_vars=make_baseline_input_vars(), output_vars=SLIM_OUTPUT_VARS,
+    solver_kwargs={'method': 'RK45', 'atol': 1e-9, 'rtol': 1e-6,
+                   'max_step': 1.0, 'instability_neg_threshold': -1e-3})
+
 setup_baseline_stability = xso.setup(
     solver='stability', model=model_baseline, time=STAB_TIME,
     input_vars=make_baseline_input_vars())

@@ -139,10 +139,19 @@ def _obs_fingerprint(d, stat):
         Z500=agg(d['zoo_gt500_mmolN'].dropna()))
 
 
-def build_obs_targets(groups=('pre+recovery', 'post', 'recovery'), csv=DEFAULT_CSV_PATH):
-    """Per-era obs fingerprint at BOTH statistics: {group: {'med': {...}, 'mean': {...}}}."""
+def build_obs_targets(groups=('pre+recovery', 'post', 'recovery'), csv=DEFAULT_CSV_PATH,
+                      regimes=None, forcing_complete=True):
+    """Per-era obs fingerprint at BOTH statistics: {group: {'med': {...}, 'mean': {...}}}.
+    `regimes` optionally restricts to a regime_adjusted whitelist (default None = all months).
+    `forcing_complete` (default True) restricts to months with F_N/d_e/T all present (the
+    forcing's data basis -- the fair model-obs comparison set)."""
     df = pd.read_csv(csv, parse_dates=['date'])
     df['era'] = df['date'].dt.year.map(ERA_OF)
+    if regimes is not None and 'regime_adjusted' in df.columns:
+        df = df[df['regime_adjusted'].isin(regimes)]
+    if forcing_complete:
+        _fc = [c for c in ('FN_mmolN_m2_d', 'depth_cutoff', 'Temp_C') if c in df.columns]
+        df = df[df[_fc].notna().all(axis=1)]
     out = {}
     for g in groups:
         d = df[df['era'].isin(GROUP_ERAS[g])]
@@ -150,14 +159,24 @@ def build_obs_targets(groups=('pre+recovery', 'post', 'recovery'), csv=DEFAULT_C
     return out
 
 
-def build_obs_monthly(groups=('pre+recovery', 'post', 'recovery'), csv=DEFAULT_CSV_PATH):
+def build_obs_monthly(groups=('pre+recovery', 'post', 'recovery'), csv=DEFAULT_CSV_PATH,
+                      regimes=None, forcing_complete=True):
     """Per-era RAW monthly obs rows -- the points behind the clouds / boxplots that
-    build_obs_targets only aggregates. Returns {group: DataFrame} with a 'mo' column
-    and each metric in native obs units; mcs / fractions / sumP are computed per month
-    from the composition columns exactly as _obs_fingerprint does (NaN where missing)."""
+    build_obs_targets only aggregates. Returns {group: DataFrame} with a 'mo' column,
+    each metric in native obs units, and a 'regime' column (regime_adjusted) so plots can
+    mark transition / unclassified months. `regimes` (e.g. ['upwelling','relaxed']) keeps
+    only those rows. `forcing_complete` (default True) keeps only months with F_N, d_e
+    (depth_cutoff) and T (Temp_C) all present -- the months that defined the model forcing,
+    i.e. the fair model-obs comparison set."""
     df = pd.read_csv(csv, parse_dates=['date'])
     df['era'] = df['date'].dt.year.map(ERA_OF)
     df['mo'] = df['date'].dt.month
+    has_reg = 'regime_adjusted' in df.columns
+    if regimes is not None and has_reg:
+        df = df[df['regime_adjusted'].isin(regimes)]
+    if forcing_complete:
+        _fc = [c for c in ('FN_mmolN_m2_d', 'depth_cutoff', 'Temp_C') if c in df.columns]
+        df = df[df[_fc].notna().all(axis=1)]
     binc = ['pico_mmolN', 'nano_mmolN', 'micro_mmolN']
     out = {}
     for g in groups:
@@ -177,6 +196,7 @@ def build_obs_monthly(groups=('pre+recovery', 'post', 'recovery'), csv=DEFAULT_C
             'Z200': d['zoo_gt200_mmolN'].to_numpy(),
             'Z500': d['zoo_gt500_mmolN'].to_numpy(),
             'FN': d['FN_mmolN_m2_d'].to_numpy(),
+            'regime': (d['regime_adjusted'].to_numpy() if has_reg else np.full(len(d), np.nan, object)),
         })
     return out
 
@@ -201,6 +221,9 @@ def _reduce(out):
                pico=fr[0], nano=fr[1], micro=fr[2],
                Z200=Z[ze > 200].sum(0), Z500=Z[ze > 500].sum(0),
                N=out['Nutrient__value'].values)
+    res['minP'] = P.min(0)    # per-timestep min over classes -> floor-margin (robustness)
+    res['minZ'] = Z.min(0)
+    res['Ztot'] = Z.sum(0)    # total zooplankton (NPZD state time series)
     for src, key in [('Growth__uptake_value', 'PP'),
                      ('DetritusSink__sinking_value', 'Export'),  # per-volume rate (-> areal in run_one)
                      ('Detritus__value', 'D')]:
@@ -224,7 +247,7 @@ def _clim(r, spinup_yr):
         for k in keys:
             s[k] = s[k + '_med'] = s[k + '_sd'] = np.nan
             s['clim_' + k] = np.full(12, np.nan)
-        s['Z200_peak'] = s['cv_sumP'] = s['mcs_conv'] = np.nan
+        s['Z200_peak'] = s['cv_sumP'] = s['mcs_conv'] = s['minP'] = s['minZ'] = np.nan
         return s
     mo = np.clip(np.searchsorted(_MEDGES, np.mod(r['t'][keep], 365.0), 'right') + 1, 1, 12)
     yr = (r['t'][keep] // 365.0).astype(int)
@@ -240,6 +263,8 @@ def _clim(r, spinup_yr):
         s[k + '_sd'] = float(np.nanstd(ann))        # interannual SD (std of annual means)
     s['Z200_peak'] = float(np.nanmax(s['clim_Z200']))
     s['cv_sumP'] = float(np.nanstd(sp) / max(np.nanmean(sp), 1e-12))
+    s['minP'] = float(np.nanmin(r['minP'][keep])) if 'minP' in r else np.nan
+    s['minZ'] = float(np.nanmin(r['minZ'][keep])) if 'minZ' in r else np.nan
     am = np.array([np.nanmean(r['mcs'][keep][yr == y]) for y in ys])
     s['mcs_conv'] = float(np.nanmean(am[half:]) / max(np.nanmean(am[:half]), 1e-12))
     return s
