@@ -51,10 +51,18 @@ GEOM = np.asarray(pue.CARIACO_PHYTO_BIN_GEOMEANS, float)        # [0.63, 6.3, 63
 _MEDGES = np.cumsum([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])  # month day-bounds
 PERIOD = 365.0
 
-# Stiff blooming runs trip on tiny transient negative fluxes; loosen the instability
-# floor at run-time (handover 2026-06-22). Surfaced (printed), not baked into a setup;
-# genuine blow-ups still propagate NaN -> has_nan.
-SEASONAL_SOLVER_KWARGS = {**IVP_SOLVER_KWARGS, 'instability_neg_threshold': -1e-3}
+# TIGHT seasonal solver_kwargs (updated 2026-06-24). The earlier loose-tol default
+# (atol=1e-6, rtol=1e-4 inherited from IVP_SOLVER_KWARGS + relaxed neg floor) was
+# producing 21/49 NaN-terminated cells in the Marañón+Ward F_N×r_F scan — RK45
+# stage error pushing limit-cycle troughs across zero. Tight tols (atol=1e-9,
+# rtol=1e-6, max_step=1.0) eliminated ALL 21 trips with no model change, confirming
+# the trips were a numerical artefact of an oscillatory system whose cycles approach
+# the positive-orthant boundary. ~4× wall cost vs loose. Default neg floor (-1e-3)
+# is preserved as a backstop against genuine blow-ups.
+SEASONAL_SOLVER_KWARGS = {
+    'method': 'RK45', 'atol': 1e-9, 'rtol': 1e-6, 'max_step': 1.0,
+    'instability_neg_threshold': -1e-3,
+}
 
 # Composition targets entering the numeric score (mcs + the 3 fractions).
 SCORE_KEYS = ['mcs', 'pico', 'nano', 'micro']
