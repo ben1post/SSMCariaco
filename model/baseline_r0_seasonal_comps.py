@@ -80,14 +80,14 @@ def _build_fourier_func(monthly, period, n_harmonics=2):
         A[:, 2*k]     = np.sin(2 * np.pi * k * t_pts / per)
     coeffs, _, _, _ = np.linalg.lstsq(A, monthly, rcond=None)
 
+    @np.vectorize
     def fn_of_t(t):
-        t_mod = np.mod(t, per)
-        val = np.full_like(np.atleast_1d(t_mod), coeffs[0], dtype=float)
+        t_mod = t % per
+        val = coeffs[0]
         for k in range(1, n + 1):
             val += coeffs[2*k - 1] * np.cos(2 * np.pi * k * t_mod / per)
             val += coeffs[2*k]     * np.sin(2 * np.pi * k * t_mod / per)
-        result = np.maximum(val, 0.0)
-        return float(result) if np.ndim(t) == 0 else result
+        return max(val, 0.0)
     return fn_of_t
 
 
