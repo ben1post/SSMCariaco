@@ -341,7 +341,8 @@ def run_seasonal_scan(constructs=DEFAULT_CONSTRUCTS,
                       fish_rates=(0.0,), param_grid=None, years=60, spinup=15,
                       solver_kwargs=SEASONAL_SOLVER_KWARGS,
                       save_path='seasonal_scan_results.pkl', progress=True,
-                      processes=None):
+                      processes=None,
+                      maxtasksperchild=1):
     """Cartesian product (construct x group x fish x param_grid) of seasonal IVPs,
     run in parallel across `processes` workers (default os.cpu_count()-1).
     `param_grid` = {param: [values]} where param in {'mP','m_Z','KsZ','sigma_log'}.
@@ -412,7 +413,8 @@ def run_seasonal_scan(constructs=DEFAULT_CONSTRUCTS,
     # above is the per-combo detail, so the driver's generic line is off.
     run_parallel_tasks(_seasonal_worker, tasks, processes=processes,
                        on_result=on_result, progress=False,
-                       tally_flags=['has_nan'], label='seasonal')
+                       tally_flags=['has_nan'], label='seasonal',
+                       maxtasksperchild=maxtasksperchild)
 
     return SeasonalScanResult(records, obs, forcings, pnames)
 
