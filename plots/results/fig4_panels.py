@@ -35,7 +35,7 @@ import seasonal_scan_harness as ssh
 CONSTRUCT = 'maranon_ward'
 PARAMS    = dict(GGE=0.31, mP=0.0015, m_Z=0.10, KsZ=0.23, sigma_log=0.20)
 ERAS      = {'pre+recovery': 0.4, 'post': 0.0}          # era config -> graded fish rate
-SK        = {**ssh.SEASONAL_SOLVER_KWARGS, 'instability_neg_threshold': -1e-2}
+SK        = ssh.SEASONAL_SOLVER_KWARGS # {**ssh.SEASONAL_SOLVER_KWARGS, 'instability_neg_threshold': -1e-2}
 DEFAULT_PKL = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fig4_modeloutput.pkl')
 
 # ---------------------------------------------------------------- styling (Fig 1/3)

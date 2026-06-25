@@ -118,7 +118,7 @@ def make_seasonal_input_vars(fn_monthly, de_monthly, t_monthly, fish_rate=FISH_R
 # =============================================================================
 # Run-length helpers + a default (placeholder-climatology) setup
 # =============================================================================
-SEASONAL_YEARS = 5
+SEASONAL_YEARS = 40
 seasonal_time = np.arange(0.0, SEASONAL_YEARS * 365.0 + 1.0, 1.0)   # daily, full record (no spin-up discard)
 
 # Placeholder climatology so the module imports and the wiring validates; real runs
