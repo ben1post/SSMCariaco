@@ -34,8 +34,16 @@ import seasonal_scan_harness as ssh
 # ---------------------------------------------------------------- settled construct
 CONSTRUCT = 'maranon_ward'
 PARAMS    = dict(GGE=0.31, mP=0.0015, m_Z=0.10, KsZ=0.23, sigma_log=0.20)
-ERAS      = {'pre+recovery': 0.4, 'post': 0.0}          # era config -> graded fish rate
-SK        = ssh.SEASONAL_SOLVER_KWARGS # {**ssh.SEASONAL_SOLVER_KWARGS, 'instability_neg_threshold': -1e-2}
+# Per-era fish rates, updated 2026-06-25 from the 61-pt r_F sweep. Pre+rec at 0.5
+# sits in the score-best plateau (score 0.154 vs the prior 0.4's 0.209). Post at
+# 0.1 sits in the post-era score valley (0.170) and addresses the biological
+# defensibility of the prior 0.0 (sardines were REDUCED, not absent, post-collapse).
+ERAS      = {'pre+recovery': 0.5, 'post': 0.1}
+# Tight RK45 defaults (atol=1e-9, rtol=1e-6, max_step=1.0, floor=-1e-3) inherited
+# from seasonal_scan_harness.SEASONAL_SOLVER_KWARGS. The earlier legacy override
+# (`instability_neg_threshold=-1e-2`) is no longer needed — scipy#10070 + tight
+# tols solved the Marañón+Ward trip pattern. See project_solver_tolerances.
+SK        = ssh.SEASONAL_SOLVER_KWARGS
 DEFAULT_PKL = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fig4_modeloutput.pkl')
 
 # ---------------------------------------------------------------- styling (Fig 1/3)
@@ -84,26 +92,35 @@ def _run(forc_era, fish):
                        solver_kwargs=SK, return_traj=True)
 
 
-def prep(regimes=None, forcing_complete=True):
+def prep(regimes=None, forcing_complete=True, eras=None):
     """Run the 4 configs (era diagonal + 2x2 off-diagonals) + load obs. Returns a bundle
     dict: runs[(era, fish)] = (clim, r); obs_m (raw monthly, carries a 'regime' column); obs_t.
     `regimes` drops transition/NaN obs at build time (default None keeps all; plots mark them).
-    `forcing_complete` (default True) restricts obs to F_N/d_e/T-complete months -- the fair set."""
+    `forcing_complete` (default True) restricts obs to F_N/d_e/T-complete months -- the fair set.
+    `eras` optionally overrides the module-level ERAS dict {era: fish_rate} so retuning the
+    fish rates is a parameter change, not a file edit. Default None -> use ERAS."""
+    e = eras if eras is not None else ERAS
     forc = ssh.build_forcings(['pre+recovery', 'post'])
+    # 2x2: each era × both per-era fish rates → diagonal cells (era at its own
+    # r_F) + off-diagonal counterfactuals (era at the other era's r_F).
+    fish_values = sorted(set(e.values()))
     runs = {(era, fish): _run(forc[era], fish)
-            for era in ('pre+recovery', 'post') for fish in (0.0, 0.4)}
+            for era in ('pre+recovery', 'post') for fish in fish_values}
     return dict(runs=runs,
                 obs_m=ssh.build_obs_monthly(['pre+recovery', 'post'], regimes=regimes, forcing_complete=forcing_complete),
                 obs_t=ssh.build_obs_targets(['pre+recovery', 'post'], regimes=regimes, forcing_complete=forcing_complete))
 
 
-def build_output(path=DEFAULT_PKL, regimes=None, forcing_complete=True):
+def build_output(path=DEFAULT_PKL, regimes=None, forcing_complete=True, eras=None):
     """Run the 4 configs + obs (run this cell THREAD-PINNED), tag with metadata, and pickle
     to `path` (beside this script). Re-run when the construct / params / obs filters change.
     `regimes` drops transition/NaN obs; `forcing_complete` (default True) keeps only
-    F_N/d_e/T-complete months (the fair comparison set). Both recorded in the metadata."""
-    D = prep(regimes=regimes, forcing_complete=forcing_complete)
-    D['meta'] = dict(construct=CONSTRUCT, params=dict(PARAMS), fish=dict(ERAS),
+    F_N/d_e/T-complete months (the fair comparison set). Both recorded in the metadata.
+    `eras` optionally overrides the module-level ERAS for the fish rates (testing alternate
+    r_F pairs without editing the file); the rates actually used are recorded in meta['fish']."""
+    e = eras if eras is not None else ERAS
+    D = prep(regimes=regimes, forcing_complete=forcing_complete, eras=e)
+    D['meta'] = dict(construct=CONSTRUCT, params=dict(PARAMS), fish=dict(e),
                      solver_floor=SK.get('instability_neg_threshold'),
                      regimes=regimes, forcing_complete=forcing_complete,
                      created=time.strftime('%Y-%m-%d %H:%M'))
@@ -297,13 +314,20 @@ def panel_mcs_fn(ax, D, era, show_ylabel=True, show_legend=True, loop=True, anno
 
 # ============================================================ 6. the 2x2 with seasonal-range whiskers
 def panel_2x2(ax, D, metric='mcs'):
-    """{pre, post} forcing x {fish off (open), fish on (filled)}. Each cell: a marker at the
-    median + a whisker spanning the seasonal range (monthly-clim min..max). Obs (star + range)
-    only on the observed diagonal."""
-    obs_fish = {'pre+recovery': 0.4, 'post': 0.0}
+    """{pre, post} forcing x {low (open), high (filled)} fish rate. Each cell: a marker at
+    the median + a whisker spanning the seasonal range (monthly-clim min..max). Obs (star
+    + range) only on the observed diagonal (the cell where fish == eras_used[era]).
+    Fish rates are derived from D['meta']['fish'] (what build_output actually used),
+    so the panel stays consistent when build_output is called with a custom `eras`
+    override. Falls back to the module-level ERAS for older pickles missing meta.
+    Legend labels read 'fish on/off' as shorthand for high/low; see meta['fish'] for
+    the actual rates."""
+    eras_used = D.get('meta', {}).get('fish', ERAS)
+    fish_values = sorted(set(eras_used.values()))           # [low, high] = [post r_F, pre r_F]
+    low, high = fish_values[0], fish_values[-1]
     for i, era in enumerate(('pre+recovery', 'post')):
         col = ERA_COL[era]
-        for fish, dx, filled in [(0.0, -0.18, False), (0.4, 0.18, True)]:
+        for fish, dx, filled in [(low, -0.18, False), (high, 0.18, True)]:
             clim, r = D['runs'][(era, fish)]
             c = clim.get('clim_' + metric)
             md = clim.get(metric + '_med', np.nan)
@@ -314,7 +338,8 @@ def panel_2x2(ax, D, metric='mcs'):
         om = D['obs_m'][era].dropna(subset=[metric])
         if len(om):
             ocyc = om.groupby('mo')[metric].median().reindex(_MO).values
-            ox = i + (0.18 if obs_fish[era] == 0.4 else -0.18)
+            # obs star on the diagonal cell: the column matching eras_used[era]
+            ox = i + (0.18 if eras_used[era] == high else -0.18)
             ax.vlines(ox, np.nanmin(ocyc), np.nanmax(ocyc), color='0.2', lw=2.5, alpha=0.45, zorder=3)
             ax.plot(ox, np.nanmedian(ocyc), '*', color='0.15', ms=13, zorder=5, path_effects=HALO3)
     ax.set_xticks([0, 1]); ax.set_xticklabels(['pre forcing', 'post forcing'], fontsize=8)
