@@ -161,3 +161,4 @@ cython_debug/
 .DS_Store
 *.ncdf
 plots/results/fig5_alpha_sinusoidal_50x50_2026-06-26.nc
+parameter_scan/FINAL/traj_cache.pkl
