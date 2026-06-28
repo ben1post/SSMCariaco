@@ -74,6 +74,7 @@ METRIC_KEYS = ['mcs', 'pico', 'nano', 'micro', 'Z200', 'Z500', 'sumP', 'N', 'PP'
 _PARAM_SLOT = {
     'KsZ': ('Grazing', 'KsZ'), 'sigma_log': ('Grazing', 'sigma_log'),
     'GGE': ('GrazingRouter', 'gge'),                 # gross growth efficiency (Stock 0.25 default)
+    'q10_grow': ('Growth', 'q10'), 'q10_graze': ('Grazing', 'q10'),  # Cloern Q10 1.62/2.48 (added 2026-06-28, OAT)
     'k_remin': ('DetritusRemin', 'k_remin'),         # remineralisation rate [d-1]
     'w_sink': ('DetritusSink', 'w_sink'),            # detritus sinking velocity [m d-1]
     'm_Zlin': ('ZooLinMortality', 'rate'),           # linear zoo loss [d-1]
@@ -117,14 +118,32 @@ def _monthly_mean(df, eras, col):
     return s.interpolate(limit_direction='both').values        # gaps -> spline-friendly
 
 
-def build_forcings(groups=('pre+recovery', 'post', 'recovery'), csv=DEFAULT_CSV_PATH):
-    """Per-era 12-month F_N / d_e / T climatologies (d_e, T forced directly from obs)."""
+def _monthly_doy(df, eras, date_col='niskin_date'):
+    """Per-era×month mean cruise day-of-year from `date_col` (12-vector; NaN where no
+    cruise that month -> mid-month fallback downstream). Added 2026-06-28 for DOY forcing."""
+    if date_col not in df.columns:
+        return np.full(12, np.nan)
+    sub = df[df['era'].isin(eras)]
+    doy = pd.to_datetime(sub[date_col], errors='coerce').dt.dayofyear
+    return doy.groupby(sub['mo']).mean().reindex(range(1, 13)).values
+
+
+def build_forcings(groups=('pre+recovery', 'post', 'recovery'), csv=DEFAULT_CSV_PATH,
+                   hplc_coincident=False):
+    """Per-era 12-month F_N / d_e / T climatologies (d_e, T forced directly from obs),
+    plus per-era×month mean cruise DOY (from niskin_date) as the Fourier fit positions
+    (added 2026-06-28). `hplc_coincident=True` restricts to cruises with HPLC composition
+    present (micro_frac.notna()) -- the 'standard' size-obs comparison set; default False
+    = all cruises (legacy behaviour)."""
     df = pd.read_csv(csv, parse_dates=['date'])
     df['era'] = df['date'].dt.year.map(ERA_OF)
     df['mo'] = df['date'].dt.month
+    if hplc_coincident and 'micro_frac' in df.columns:
+        df = df[df['micro_frac'].notna()]
     return {g: dict(fn=_monthly_mean(df, GROUP_ERAS[g], 'FN_mmolN_m2_d'),
                     de=_monthly_mean(df, GROUP_ERAS[g], 'depth_cutoff'),
-                    t=_monthly_mean(df, GROUP_ERAS[g], 'Temp_C')) for g in groups}
+                    t=_monthly_mean(df, GROUP_ERAS[g], 'Temp_C'),
+                    doy=_monthly_doy(df, GROUP_ERAS[g])) for g in groups}
 
 
 def _obs_fingerprint(d, stat):
@@ -195,6 +214,13 @@ def build_obs_monthly(groups=('pre+recovery', 'post', 'recovery'), csv=DEFAULT_C
             fr = np.where(tot[:, None] > 0, A / tot[:, None], np.nan)
         out[g] = pd.DataFrame({
             'mo': d['mo'].to_numpy(),
+            # actual cruise day-of-year (mean day if dual-sampled) for day-resolution
+            # model-obs plotting; HPLC for size/biomass metrics, Niskin for N/PP.
+            # Guarded so it works on CSVs generated before the hplc_date/niskin_date carry-through.
+            'doy_hplc':   (pd.to_datetime(d['hplc_date'],   errors='coerce').dt.dayofyear.to_numpy()
+                           if 'hplc_date' in d else np.full(len(d), np.nan)),
+            'doy_niskin': (pd.to_datetime(d['niskin_date'], errors='coerce').dt.dayofyear.to_numpy()
+                           if 'niskin_date' in d else np.full(len(d), np.nan)),
             'mcs': np.where(tot > 0, 10.0 ** (fr @ np.log10(GEOM)), np.nan),
             'pico': fr[:, 0], 'nano': fr[:, 1], 'micro': fr[:, 2],
             'sumP': np.where(tot > 0, tot, np.nan),
@@ -280,34 +306,42 @@ def _clim(r, spinup_yr):
 
 def run_one(construct, forcing, fish_rate=0.0, years=60, spinup=15,
             mP=None, m_Z=None, grazing=None, iv_overrides=None,
-            solver_kwargs=SEASONAL_SOLVER_KWARGS, return_traj=False):
+            solver_kwargs=SEASONAL_SOLVER_KWARGS, return_traj=False,
+            n_harmonics=N_HARMONICS, mu_scale=1.0, graze_scale=1.0):
     """One seasonal IVP. Growth = construct; mP / m_Z / grazing override the defaults;
     iv_overrides = {slot: {param: val}} sets arbitrary closure/remin/routing params.
     return_traj=True returns (clim, r) keeping the full post-reduce trajectory r
     (metric time series + forcing FN(t)/de(t)/T(t) attached) for diagnostics; default
     returns the clim summary only, so the scan path is byte-identical.
     Forcing interpolation = 2-harmonic Fourier fit (replaced cubic spline, 2026-06-24)."""
+    # mu_scale / graze_scale (added 2026-06-28, OAT screen): uniform multipliers on the whole
+    # growth mu_max(s) / grazing I_max(s) spectra, applied on top of the construct allometry.
+    doy = forcing.get('doy')                          # per-month mean cruise DOY (None -> mid-month); 2026-06-28
+    mu = (np.asarray(construct['mu_max'], float) * mu_scale) if mu_scale != 1.0 else construct['mu_max']
     iv = make_seasonal_input_vars(
         forcing['fn'], forcing['de'], forcing['t'], fish_rate=fish_rate,
-        mu_max=construct['mu_max'], halfsat=construct['halfsat'],
-        mP=(M_P if mP is None else mP), m_Z=(M_Z_BULK if m_Z is None else m_Z))
+        mu_max=mu, halfsat=construct['halfsat'],
+        mP=(M_P if mP is None else mP), m_Z=(M_Z_BULK if m_Z is None else m_Z),
+        n_harmonics=n_harmonics, doy=doy)
     if grazing:
         iv['Grazing'].update(grazing)
     for slot, d in (iv_overrides or {}).items():
         iv[slot].update(d)
+    if graze_scale != 1.0:                            # uniform grazing-rate multiplier (OAT)
+        iv['Grazing']['Imax'] = np.asarray(iv['Grazing']['Imax'], float) * graze_scale
     time_ax = np.arange(0.0, years * 365.0 + 1.0, 1.0)
     setup = xso.setup(solver='solve_ivp', model=model_baseline_seasonal, time=time_ax,
                       input_vars=iv, output_vars=SLIM_OUTPUT_VARS, solver_kwargs=solver_kwargs)
     out = pue.run_single_point(model_baseline_seasonal, setup, {})
     r = _reduce(out)
     if 'Export' in r:                                # per-volume rate -> areal flux (= w_sink*D)
-        de_t = _build_fourier_func(forcing['de'], PERIOD, N_HARMONICS)(r['t'])
+        de_t = _build_fourier_func(forcing['de'], PERIOD, n_harmonics, t_pts=doy)(r['t'])
         r['Export'] = r['Export'] * de_t
     clim = _clim(r, spinup)
     if return_traj:                                  # attach forcing series for diagnostics
-        r['FN'] = _build_fourier_func(forcing['fn'], PERIOD, N_HARMONICS)(r['t'])
-        r['de'] = _build_fourier_func(forcing['de'], PERIOD, N_HARMONICS)(r['t'])
-        r['T'] = _build_fourier_func(forcing['t'], PERIOD, N_HARMONICS)(r['t'])
+        r['FN'] = _build_fourier_func(forcing['fn'], PERIOD, n_harmonics, t_pts=doy)(r['t'])
+        r['de'] = _build_fourier_func(forcing['de'], PERIOD, n_harmonics, t_pts=doy)(r['t'])
+        r['T'] = _build_fourier_func(forcing['t'], PERIOD, n_harmonics, t_pts=doy)(r['t'])
         return clim, r
     return clim
 
@@ -342,19 +376,24 @@ def run_seasonal_scan(constructs=DEFAULT_CONSTRUCTS,
                       solver_kwargs=SEASONAL_SOLVER_KWARGS,
                       save_path='seasonal_scan_results.pkl', progress=True,
                       processes=None,
-                      maxtasksperchild=1):
+                      maxtasksperchild=1, forcings=None, n_harmonics=N_HARMONICS,
+                      param_combos=None):
     """Cartesian product (construct x group x fish x param_grid) of seasonal IVPs,
     run in parallel across `processes` workers (default os.cpu_count()-1).
     `param_grid` = {param: [values]} where param in {'mP','m_Z','KsZ','sigma_log'}.
     score = max(model-mean-vs-obs-mean, model-median-vs-obs-median). Each completed
     run is appended + re-pickled from the parent (single writer).
     Forcing interpolation = 2-harmonic Fourier (replaced spline_s arg, 2026-06-24)."""
-    forcings = build_forcings(groups)
+    forcings = forcings if forcings is not None else build_forcings(groups)
     obs = build_obs_targets(groups)
     specs = [allometry(c) if isinstance(c, str) else c for c in constructs]
-    pnames = list((param_grid or {}).keys())
-    pgrid = [dict(zip(pnames, pv)) for pv in itertools.product(*[param_grid[p] for p in pnames])] \
-        if pnames else [{}]
+    if param_combos is not None:                      # explicit param-dict list (OAT/LHS/Sobol) — added 2026-06-28
+        pgrid = [dict(p) for p in param_combos]
+        pnames = sorted({k for p in pgrid for k in p})
+    else:
+        pnames = list((param_grid or {}).keys())
+        pgrid = [dict(zip(pnames, pv)) for pv in itertools.product(*[param_grid[p] for p in pnames])] \
+            if pnames else [{}]
     combos = [(s, g, f, p) for s in specs for g in groups for f in fish_rates for p in pgrid]
     n = len(combos)
 
@@ -362,20 +401,22 @@ def run_seasonal_scan(constructs=DEFAULT_CONSTRUCTS,
     def _kwargs(s, g, f, p):
         ivo = {}
         for k, v in p.items():
-            if k in ('mP', 'm_Z'):
+            if k in ('mP', 'm_Z', 'mu_scale', 'graze_scale'):   # direct run_one args, not iv slots
                 continue
             slot, key = _PARAM_SLOT[k]
             ivo.setdefault(slot, {})[key] = v
         return dict(construct=s, forcing=forcings[g], fish_rate=f, years=years,
                     spinup=spinup, mP=p.get('mP'), m_Z=p.get('m_Z'),
-                    iv_overrides=(ivo or None), solver_kwargs=solver_kwargs)
+                    iv_overrides=(ivo or None), solver_kwargs=solver_kwargs,
+                    n_harmonics=n_harmonics,
+                    mu_scale=p.get('mu_scale', 1.0), graze_scale=p.get('graze_scale', 1.0))
 
     tasks = [(_kwargs(s, g, f, p),) for (s, g, f, p) in combos]   # 1-tuple per task
 
     t0 = time.time()
     print(f"[seasonal scan] {n} runs: {[s['name'] for s in specs]} x {list(groups)} x "
           f"fish={list(fish_rates)} x params{pnames or '[]'} | {years} yr each (spin-up {spinup})")
-    print(f"solver: {solver_kwargs} | fourier n_harm={N_HARMONICS} | processes={processes or 'cpu-1'}")
+    print(f"solver: {solver_kwargs} | fourier n_harm={n_harmonics} | processes={processes or 'cpu-1'}")
 
     records = []
 

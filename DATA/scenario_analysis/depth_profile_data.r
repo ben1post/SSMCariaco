@@ -368,6 +368,75 @@ fit_euphotic_proxy <- function(scenario_data,
 }
 
 
+#' Fit the within-MOTE diagnostic-pigment -> Tot_Chl_a calibration
+#'
+#' MOTE reported Tot_Chl_a = "nd" at every depth on a run of pre-collapse cruises
+#' (Nov 2000 - Jul 2001) while the 7 Vidussi diagnostic pigments were measured, so
+#' size fractions resolve but absolute biomass is NA -- erasing the pre-era bloom
+#' peaks from the model-obs comparison. This fits the within-MOTE relationship
+#' Tot_Chl_a = k * DP2 (origin fit; DP2 = the Uitz/Lorenzoni weighted diagnostic-
+#' pigment sum) over the MOTE cruises that DO have measured Tot_Chl_a, and lists
+#' the MOTE cruises that have none -- the dates get_full_scenario_data() fills.
+#'
+#' k is cutoff-invariant (a ratio of co-integrated quantities), so the fixed
+#' calibration layer (0 - calib_depth) gives the robust large-n estimate that
+#' transfers to the dynamic euphotic integration used in the fill. A GLOBAL,
+#' cross-lab fit is biased (R2 ~ 0.4) by lab-specific DPA fraction bias, so the
+#' calibration is MOTE-only. Basis: Uitz et al. 2006, Vertical distribution of
+#' phytoplankton communities in open ocean (diagnostic-pigment TChla estimator);
+#' Lorenzoni et al. 2015 (CARIACO application).
+#'
+#' @param profile_data Output from load_profile_data()
+#' @param source_dir Directory holding the raw BCO-DMO lab CSVs (for the lab map)
+#' @param lab_files Named vector of lab CSV filenames (names = lab labels)
+#' @param calib_depth Upper layer (m) over which the calibration means are taken
+#' @return List: k, r_squared, n_calib, fill_dates, calib (per-cruise table), calib_depth
+fit_mote_tchla_calibration <- function(profile_data,
+                                       source_dir = "../BCO-DMO",
+                                       lab_files = c(BBRS = "hplc_bbrs.csv",
+                                                     MOTE = "hplc_mote.csv",
+                                                     HPL  = "hplc_hpl.csv",
+                                                     NGSFC = "hplc_ngsfc.csv"),
+                                       calib_depth = 50) {
+
+  dp7 <- c("Fuco", "Perid", "Allo", "But_fuco", "Hex_fuco", "Zea", "Tot_Chl_b")
+
+  # date -> source(lab) map from the raw lab files (profiles RDS carries no lab tag)
+  src_map <- imap_dfr(lab_files, function(fn, lab)
+      tibble(date = as.Date(as.character(
+               read.csv(file.path(source_dir, fn))$Date), "%Y%m%d"), source = lab)) %>%
+    distinct() %>% group_by(date) %>%
+    summarise(source = paste(sort(unique(source)), collapse = "+"), .groups = "drop")
+
+  # per-cruise MOTE means over 0 - calib_depth
+  mote_cal <- profile_data$hplc %>%
+    select(-any_of("source")) %>%
+    left_join(src_map, by = "date") %>%
+    filter(source == "MOTE", depth >= 0, depth <= calib_depth) %>%
+    mutate(across(all_of(dp7), ~replace_na(., 0)),
+           DPw = 1.41 * Fuco + 1.41 * Perid + 0.60 * Allo + 0.35 * But_fuco +
+                 1.27 * Hex_fuco + 0.86 * Zea + 1.01 * Tot_Chl_b) %>%
+    group_by(date) %>%
+    summarise(TChla = mean(Tot_Chl_a, na.rm = TRUE),
+              DP2   = mean(DPw, na.rm = TRUE),
+              n_tca = sum(!is.na(Tot_Chl_a)), .groups = "drop")
+
+  cal <- mote_cal %>% filter(n_tca > 0, is.finite(TChla), DP2 > 0.001)
+  fit <- lm(TChla ~ DP2 + 0, data = cal)              # through origin
+  k   <- unname(coef(fit)[1])
+  fill_dates <- mote_cal %>% filter(n_tca == 0) %>% pull(date)
+
+  cat(sprintf("\nMOTE Tot_Chl_a calibration (origin, 0-%gm): k = %.3f  R2 = %.3f  n = %d\n",
+              calib_depth, k, summary(fit)$r.squared, nrow(cal)))
+  cat(sprintf("  Cruises to reconstruct: %d  (%s)\n",
+              length(fill_dates),
+              paste(format(sort(fill_dates), "%Y-%m-%d"), collapse = ", ")))
+
+  list(k = k, r_squared = summary(fit)$r.squared, n_calib = nrow(cal),
+       fill_dates = fill_dates, calib = mote_cal, calib_depth = calib_depth)
+}
+
+
 #' Compare euphotic depth proxy models
 #'
 #' Fits both isotherm-only and isotherm+Chl models and returns comparison.
@@ -864,6 +933,7 @@ get_full_scenario_data <- function(profile_data,
                                     fixed_depth = 50,
                                     scenario_depths = c(upwelling = 35, relaxed = 50),
                                     proxy_model = NULL,
+                                    tchla_calib = NULL,
                                     trap_lag_months = 0,
                                     start_date = as.Date("1995-11-01"),
                                     end_date = as.Date("2017-01-01"),
@@ -1124,7 +1194,47 @@ get_full_scenario_data <- function(profile_data,
       pico_mmolN  = chl_to_mmolN(pico_abs,  depth_cutoff, C_TO_CHL_PICO),
       TotChlA_mmolN = micro_mmolN + nano_mmolN + pico_mmolN
     )
-  
+
+  # =========================================================================
+  # 4b. MOTE Tot_Chl_a RECONSTRUCTION (opt-in; off unless tchla_calib supplied)
+  # =========================================================================
+  # MOTE reported Tot_Chl_a = "nd" at every depth on a run of pre-collapse
+  # cruises (Nov 2000 - Jul 2001) while the 7 Vidussi diagnostic pigments were
+  # measured, so size fractions resolve but absolute biomass -- and therefore the
+  # *_mmolN columns that build_obs_monthly() turns into sumP / mcs / fractions --
+  # is NA, erasing the pre-era bloom peaks from the model-obs comparison.
+  # Fill the missing INTEGRATED Tot_Chl_a from the diagnostic-pigment sum DP2 via
+  # the within-MOTE DPA calibration  Tot_Chl_a_int = tchla_calib$k * DP2  (origin
+  # fit on the n=29 MOTE cruises with measured TChla, R^2 ~ 0.95, k ~ 1.34; the
+  # dynamic-cutoff subset agrees, k = 1.36; the cutoff cancels in the ratio so k
+  # is depth-stable). Basis: Uitz et al. 2006, Vertical distribution of
+  # phytoplankton communities in open ocean (diagnostic-pigment TChla estimator);
+  # Lorenzoni et al. 2015 (CARIACO application). Only fills the supplied MOTE
+  # dates where Tot_Chl_a_int is genuinely missing AND DP2 resolves; every other
+  # lab/date and all measured TChla are left untouched. Filled rows are flagged
+  # TChla_reconstructed = TRUE so downstream plots can mark them.
+  if (!is.null(tchla_calib) && length(tchla_calib$fill_dates) > 0) {
+    .k <- tchla_calib$k
+    hplc_integrated <- hplc_integrated %>%
+      mutate(
+        TChla_reconstructed = (date %in% tchla_calib$fill_dates) &
+                              !is.finite(Tot_Chl_a_int) & !is.na(DP2),
+        Tot_Chl_a_int = ifelse(TChla_reconstructed, .k * DP2, Tot_Chl_a_int),
+        # recompute ONLY the Tot_Chl_a-dependent columns for the filled rows
+        micro_abs   = micro * Tot_Chl_a_int,
+        nano_abs    = nano  * Tot_Chl_a_int,
+        pico_abs    = pico  * Tot_Chl_a_int,
+        micro_mmolN = chl_to_mmolN(micro_abs, depth_cutoff, C_TO_CHL_MICRO),
+        nano_mmolN  = chl_to_mmolN(nano_abs,  depth_cutoff, C_TO_CHL_NANO),
+        pico_mmolN  = chl_to_mmolN(pico_abs,  depth_cutoff, C_TO_CHL_PICO),
+        TotChlA_mmolN = micro_mmolN + nano_mmolN + pico_mmolN
+      )
+    cat(sprintf("  MOTE Tot_Chl_a reconstruction: %d cruise(s) filled (k = %.3f)\n",
+                sum(hplc_integrated$TChla_reconstructed, na.rm = TRUE), .k))
+  } else {
+    hplc_integrated$TChla_reconstructed <- FALSE
+  }
+
   # Aggregate to monthly
   hplc_monthly <- hplc_integrated %>%
     group_by(time_month) %>%
@@ -1157,6 +1267,11 @@ get_full_scenario_data <- function(profile_data,
       size_shannon = mean(size_shannon, na.rm = TRUE),
       slope_2pt = mean(slope_2pt, na.rm = TRUE),
       nbss_slope = mean(nbss_slope, na.rm = TRUE),
+      # TRUE if any cruise contributing to this month had its Tot_Chl_a filled
+      TChla_reconstructed = any(TChla_reconstructed, na.rm = TRUE),
+      # mean actual HPLC cruise date for the month (mean day if dual-sampled) -
+      # carried through for day-of-year (not month-tick) model-obs plotting
+      hplc_date = mean(date, na.rm = TRUE),
       n_hplc_samples = n(),
       .groups = "drop"
     ) %>%
@@ -1221,6 +1336,9 @@ get_full_scenario_data <- function(profile_data,
       Chl_niskin_mmolN = mean(Chl_niskin_mmolN, na.rm = TRUE),
       PhaeoChl_ratio   = mean(PhaeoChl_ratio, na.rm = TRUE),
       Temp_C           = mean(Temp_C, na.rm = TRUE),
+      # mean actual Niskin cruise date for the month (mean day if dual-sampled) -
+      # carried through for day-of-year (not month-tick) model-obs plotting
+      niskin_date = mean(date, na.rm = TRUE),
       n_niskin_samples = n(),
       .groups = "drop"
     ) %>%

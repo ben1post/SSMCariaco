@@ -55,7 +55,7 @@ def _build_fn_func(fn_monthly, period, spline_k, spline_s):
     return fn_of_t
 
 
-def _build_fourier_func(monthly, period, n_harmonics=2):
+def _build_fourier_func(monthly, period, n_harmonics=2, t_pts=None):
     """Truncated Fourier (harmonic) fit through 12 monthly values, evaluated as a
     periodic function of continuous time.  Replaces _build_fn_func (2026-06-24).
 
@@ -72,7 +72,11 @@ def _build_fourier_func(monthly, period, n_harmonics=2):
     monthly = np.asarray(monthly, dtype=float)
     per = float(period)
     n = int(n_harmonics)
-    t_pts = _MID_MONTH_DOY
+    if t_pts is None:                                 # added 2026-06-28: real cruise-DOY fit positions
+        t_pts = _MID_MONTH_DOY
+    else:                                             # per-month NaN -> calendar mid-month fallback
+        t_pts = np.asarray(t_pts, dtype=float)
+        t_pts = np.where(np.isfinite(t_pts), t_pts, _MID_MONTH_DOY)
     ncols = 1 + 2 * n
     A = np.ones((12, ncols))
     for k in range(1, n + 1):
@@ -128,6 +132,9 @@ class SeasonalForcing:
                                description='12 calendar-month mean d_e [m] (forced directly from obs)')
     t_monthly  = xso.parameter(dims='month',
                                description='12 calendar-month mean T [°C] (forced directly from obs)')
+    doy_monthly = xso.parameter(dims='month',
+                                description='per-month mean cruise DOY = Fourier fit positions '
+                                            '(added 2026-06-28); NaN -> calendar mid-month')
 
     fn          = xso.forcing(setup_func='make_fn',
                               description='seasonal new-N flux F_N(t) [mmol N m-2 d-1]')
@@ -136,15 +143,15 @@ class SeasonalForcing:
     temperature = xso.forcing(setup_func='make_temperature',
                               description='seasonal box temperature T(t) [°C]')
 
-    def make_fn(self, fn_monthly, period, n_harmonics, fn_scale):
+    def make_fn(self, fn_monthly, period, n_harmonics, fn_scale, doy_monthly):
         return _build_fourier_func(np.asarray(fn_monthly) * float(fn_scale),
-                                   period, n_harmonics)
+                                   period, n_harmonics, t_pts=doy_monthly)
 
-    def make_de(self, de_monthly, period, n_harmonics):
-        return _build_fourier_func(de_monthly, period, n_harmonics)
+    def make_de(self, de_monthly, period, n_harmonics, doy_monthly):
+        return _build_fourier_func(de_monthly, period, n_harmonics, t_pts=doy_monthly)
 
-    def make_temperature(self, t_monthly, period, n_harmonics):
-        return _build_fourier_func(t_monthly, period, n_harmonics)
+    def make_temperature(self, t_monthly, period, n_harmonics, doy_monthly):
+        return _build_fourier_func(t_monthly, period, n_harmonics, t_pts=doy_monthly)
 
 
 @xso.component

@@ -82,7 +82,7 @@ model_baseline_seasonal = xso.create({
 def make_seasonal_input_vars(fn_monthly, de_monthly, t_monthly, fish_rate=FISH_RATE,
                              mu_max=mu_max_arr, halfsat=ks_arr,
                              mP=M_P, m_Z=M_Z_BULK,
-                             period=PERIOD, n_harmonics=N_HARMONICS):
+                             period=PERIOD, n_harmonics=N_HARMONICS, doy=None):
     """Input-vars for model_baseline_seasonal.
 
     Starts from make_baseline_input_vars (all the SS defaults: growth allometry,
@@ -110,6 +110,9 @@ def make_seasonal_input_vars(fn_monthly, de_monthly, t_monthly, fish_rate=FISH_R
         'fn_label': 'fn', 'de_label': 'de', 'temperature_label': 'temperature',
         'period': float(period), 'n_harmonics': int(n_harmonics),
         'fn_scale': 1.0,   # added 2026-06-25; sweep via param_name='Forcing__fn_scale'
+        # per-month mean cruise DOY = Fourier fit positions (added 2026-06-28);
+        # None -> 12×NaN -> _build_fourier_func falls back to calendar mid-month (legacy).
+        'doy_monthly': (np.full(12, np.nan) if doy is None else np.asarray(doy, dtype=float)),
     }
     iv['Inflow'] = {'var': 'N', 'fn': 'fn', 'de': 'de'}
     return iv
@@ -118,7 +121,7 @@ def make_seasonal_input_vars(fn_monthly, de_monthly, t_monthly, fish_rate=FISH_R
 # =============================================================================
 # Run-length helpers + a default (placeholder-climatology) setup
 # =============================================================================
-SEASONAL_YEARS = 40
+SEASONAL_YEARS = 5
 seasonal_time = np.arange(0.0, SEASONAL_YEARS * 365.0 + 1.0, 1.0)   # daily, full record (no spin-up discard)
 
 # Placeholder climatology so the module imports and the wiring validates; real runs
