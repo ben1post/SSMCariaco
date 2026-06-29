@@ -332,54 +332,6 @@ class DistributedGrazing_TypeIII_T_Herb:
 
 
 @xso.component
-class DistributedGrazing_TypeII_T:
-    """Distributed (kernel) Holling Type II grazing with Q10 on I_max — community
-    saturated, NO low-prey refuge. Same structure as DistributedGrazing_TypeIII_T
-    (omnivory kernel via setup_func, Q10, publishes 'graze_matrix') but the
-    saturation is S_j/(S_j+K_sZ) (Type II) rather than S_j²/(S_j²+K_sZ²) (Type III):
-
-        G_kj = Q10^((T-T_ref)/10) · I_max,j · Z_j · φ_kj · B_k / (S_j + K_sZ)
-        S_j  = Σ_k φ_kj · B_k
-
-    Banas (2011) Eq. 8 form generalised to the distributed kernel. At low prey it
-    grazes ∝ S (no rare-prey refuge); at high prey total ingestion → I_max,j·Z_j.
-    NOTE: K_sZ here is the TYPE II half-saturation (Banas K ≈ 3 mmol N) — NOT the
-    same quantity as the Type III 0.23.
-    """
-    resource = xso.variable(foreign=True, dims='phyto')
-    consumer = xso.variable(foreign=True, dims='zoo')
-    temperature = xso.forcing(foreign=True, description='box temperature [°C]')
-
-    phyto_esd = xso.parameter(foreign=True, dims='phyto',
-                              description='phyto size grid [µm] (foreign-ref)')
-    zoo_esd = xso.parameter(foreign=True, dims='zoo',
-                            description='zoo size grid [µm] (foreign-ref)')
-
-    theta_opt = xso.parameter(description='predator:prey ESD ratio at kernel peak (typ. 10)')
-    sigma_log = xso.parameter(description='kernel width σ in log10(ESD) space')
-
-    phiPZ = xso.parameter(dims=('full', 'zoo'), setup_func='_build_phiPZ',
-                          description='log-Gaussian omnivory kernel (mode="omni")')
-
-    Imax = xso.parameter(dims='zoo', description='per-class max ingestion [d-1]')
-    KsZ = xso.parameter(description='TYPE II grazing half-sat [mmol N m-3] (Banas K≈3)')
-    q10 = xso.parameter(description='grazing Q10 (Cloern 2018: 2.48)')
-    t_ref = xso.parameter(description='reference temperature [°C] (20)')
-
-    def _build_phiPZ(self, phyto_esd, zoo_esd, theta_opt, sigma_log):
-        return compute_grazing_kernel(phyto_esd, zoo_esd, mode='omni',
-                                      theta_opt=theta_opt, sigma_log=sigma_log,
-                                      convention='mattern')
-
-    @xso.flux(group='graze_matrix', dims=('full', 'zoo'))
-    def grazing(self, resource, consumer, temperature, phiPZ, Imax, KsZ, q10, t_ref):
-        f_T = q10 ** ((temperature - t_ref) / 10.0)
-        biomass = self.m.concatenate((resource, consumer))
-        S = self.m.sum(phiPZ * biomass[:, None], axis=0)
-        return f_T * Imax * consumer * phiPZ * biomass[:, None] / (S + KsZ)
-
-
-@xso.component
 class DistributedGrazingRouter_route:
     """Route the 'graze_matrix' group: assimilate GGE·I to Z, remove grazed
     biomass from P and Z, and route the unassimilated (1-GGE) fraction
@@ -653,3 +605,65 @@ class FishGrazing_Kernel_rate:
     @xso.flux(dims='zoo')
     def fish_graze_zoo(self, phyto, zoo, kernel_P, kernel_Z, rate):
         return rate * kernel_Z * zoo
+
+
+@xso.component
+class FishGrazing_Kernel_route:
+    """Sardine predation on P and Z, with the grazed N routed N / D / export.
+
+    Routable variant of FishGrazing_Kernel_rate (the original one-way-export
+    component is retained unchanged for backward compatibility). Removal of prey
+    is identical:
+
+        L_P,i = r_F · kernel_P,i · P_i        L_Z,j = r_F · kernel_Z,j · Z_j
+
+    but the total grazed N  G_F = Σ_i L_P,i + Σ_j L_Z,j  is split three ways:
+
+        to N:     (1 - frac_D - frac_export) · G_F   (sardine ammonium/urea excretion)
+        to D:     frac_D · G_F                         (fecal pellets, if routed local)
+        export:   frac_export · G_F                    (fish biomass + fast-sinking pellets)
+
+    Baseline default (frac_D=0, frac_export=0.5) -> 50% N, 50% export, following
+    Stock (2008) fmz4=0.5 (planktivorous-fish predation: half rapidly recycled to
+    N, half exported/sequestered). The N+export split (no slow-D intermediary)
+    follows the same Stock/Fasham logic as the quadratic closure: a planktivore
+    assimilating ~75% with GGE ~25% excretes ~50% of intake as dissolved N locally,
+    while egested pellets (fast-sinking) and assimilated growth (fish biomass that
+    migrates / is fished) leave the box. Sardines export somewhat more than the
+    in-situ carnivore closure (migration + fishery removal), hence 0.5 vs the
+    closure's 0.67 N. r_F = 0 recovers the no-fish baseline (all four fluxes vanish).
+
+    Reference: Stock et al. (2008) Prog. Oceanogr. 76:189, §2.1.3 (fmz4=0.5);
+    Fasham et al. (1990) JMR 48:591, p.599/607 (higher-predator recycle/export).
+    """
+    phyto = xso.variable(dims='phyto', foreign=True, flux='fish_graze_phyto', negative=True)
+    zoo = xso.variable(dims='zoo', foreign=True, flux='fish_graze_zoo', negative=True)
+    detritus = xso.variable(foreign=True, flux='fish_to_D', negative=False)
+    nutrient = xso.variable(foreign=True, flux='fish_to_N', negative=False)
+    kernel_P = xso.parameter(dims='phyto', description='Rykaczewski selectivity on P (peak=1)')
+    kernel_Z = xso.parameter(dims='zoo', description='Rykaczewski selectivity on Z (peak=1)')
+    rate = xso.parameter(description='fish grazing rate r_F (top-down lever) [d-1]')
+    frac_D = xso.parameter(description='fraction of fish-grazed N -> D')
+    frac_export = xso.parameter(description='fraction exported (remainder -> N)')
+
+    @xso.flux(dims='phyto')
+    def fish_graze_phyto(self, phyto, zoo, detritus, nutrient,
+                         kernel_P, kernel_Z, rate, frac_D, frac_export):
+        return rate * kernel_P * phyto
+
+    @xso.flux(dims='zoo')
+    def fish_graze_zoo(self, phyto, zoo, detritus, nutrient,
+                       kernel_P, kernel_Z, rate, frac_D, frac_export):
+        return rate * kernel_Z * zoo
+
+    @xso.flux
+    def fish_to_D(self, phyto, zoo, detritus, nutrient,
+                  kernel_P, kernel_Z, rate, frac_D, frac_export):
+        total = self.m.sum(rate * kernel_P * phyto) + self.m.sum(rate * kernel_Z * zoo)
+        return total * frac_D
+
+    @xso.flux
+    def fish_to_N(self, phyto, zoo, detritus, nutrient,
+                  kernel_P, kernel_Z, rate, frac_D, frac_export):
+        total = self.m.sum(rate * kernel_P * phyto) + self.m.sum(rate * kernel_Z * zoo)
+        return total * (1.0 - frac_D - frac_export)

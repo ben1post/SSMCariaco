@@ -43,6 +43,7 @@ from cariaco_obs import DEFAULT_CSV_PATH
 from baseline_r0_seasonal_comps import _build_fourier_func
 from baseline_r0_seasonal_setups import (
     model_baseline_seasonal, make_seasonal_input_vars,
+    model_baseline_seasonal_routed, make_seasonal_input_vars_routed,   # routed closure/fish (2026-06-28)
     SLIM_OUTPUT_VARS, IVP_SOLVER_KWARGS, N_HARMONICS,
 )
 from baseline_r0_setups import phyto_esd, M_P, M_Z_BULK
@@ -81,6 +82,10 @@ _PARAM_SLOT = {
     'graze_fD': ('GrazingRouter', 'frac_D'), 'graze_fX': ('GrazingRouter', 'frac_export'),
     'zq_fD': ('ZooQuadMortality', 'frac_D'), 'zq_fX': ('ZooQuadMortality', 'frac_export'),
     'pm_fD': ('PhytoMortality', 'frac_D'), 'pm_fX': ('PhytoMortality', 'frac_export'),
+    # routing-fate scan slots for zoo-linear + fish (added 2026-06-29) — previously
+    # reachable only via single-run iv_overrides; now param_grid-sweepable
+    'zl_fD': ('ZooLinMortality', 'frac_D'), 'zl_fX': ('ZooLinMortality', 'frac_export'),
+    'fish_fD': ('FishGrazing', 'frac_D'), 'fish_fX': ('FishGrazing', 'frac_export'),
 }
 
 ERA_OF = lambda y: 'pre' if y < 2005 else ('post' if y < 2014 else 'recovery')
@@ -307,7 +312,7 @@ def _clim(r, spinup_yr):
 def run_one(construct, forcing, fish_rate=0.0, years=60, spinup=15,
             mP=None, m_Z=None, grazing=None, iv_overrides=None,
             solver_kwargs=SEASONAL_SOLVER_KWARGS, return_traj=False,
-            n_harmonics=N_HARMONICS, mu_scale=1.0, graze_scale=1.0):
+            n_harmonics=N_HARMONICS, mu_scale=1.0, graze_scale=1.0, routed=False):
     """One seasonal IVP. Growth = construct; mP / m_Z / grazing override the defaults;
     iv_overrides = {slot: {param: val}} sets arbitrary closure/remin/routing params.
     return_traj=True returns (clim, r) keeping the full post-reduce trajectory r
@@ -317,8 +322,10 @@ def run_one(construct, forcing, fish_rate=0.0, years=60, spinup=15,
     # mu_scale / graze_scale (added 2026-06-28, OAT screen): uniform multipliers on the whole
     # growth mu_max(s) / grazing I_max(s) spectra, applied on top of the construct allometry.
     doy = forcing.get('doy')                          # per-month mean cruise DOY (None -> mid-month); 2026-06-28
+    builder = make_seasonal_input_vars_routed if routed else make_seasonal_input_vars   # routed closure/fish (2026-06-28)
+    model   = model_baseline_seasonal_routed   if routed else model_baseline_seasonal
     mu = (np.asarray(construct['mu_max'], float) * mu_scale) if mu_scale != 1.0 else construct['mu_max']
-    iv = make_seasonal_input_vars(
+    iv = builder(
         forcing['fn'], forcing['de'], forcing['t'], fish_rate=fish_rate,
         mu_max=mu, halfsat=construct['halfsat'],
         mP=(M_P if mP is None else mP), m_Z=(M_Z_BULK if m_Z is None else m_Z),
@@ -330,20 +337,94 @@ def run_one(construct, forcing, fish_rate=0.0, years=60, spinup=15,
     if graze_scale != 1.0:                            # uniform grazing-rate multiplier (OAT)
         iv['Grazing']['Imax'] = np.asarray(iv['Grazing']['Imax'], float) * graze_scale
     time_ax = np.arange(0.0, years * 365.0 + 1.0, 1.0)
-    setup = xso.setup(solver='solve_ivp', model=model_baseline_seasonal, time=time_ax,
+    setup = xso.setup(solver='solve_ivp', model=model, time=time_ax,
                       input_vars=iv, output_vars=SLIM_OUTPUT_VARS, solver_kwargs=solver_kwargs)
-    out = pue.run_single_point(model_baseline_seasonal, setup, {})
+    out = pue.run_single_point(model, setup, {})
     r = _reduce(out)
-    if 'Export' in r:                                # per-volume rate -> areal flux (= w_sink*D)
-        de_t = _build_fourier_func(forcing['de'], PERIOD, n_harmonics, t_pts=doy)(r['t'])
+    de_t = _build_fourier_func(forcing['de'], PERIOD, n_harmonics, t_pts=doy)(r['t'])
+    if 'Export' in r:                                # detritus per-volume rate -> areal flux (= w_sink*D)
         r['Export'] = r['Export'] * de_t
+    # --- export efficiency (pze): total export & NPP, all areal (added 2026-06-28) ---
+    pb, zb = out['Phytoplankton__biomass'], out['Zooplankton__biomass']
+    Pc = pb.transpose([d for d in pb.dims if d != 'time'][0], 'time').values
+    Zc = zb.transpose([d for d in zb.dims if d != 'time'][0], 'time').values
+    kP = np.asarray(iv['FishGrazing']['kernel_P'], float); kZ = np.asarray(iv['FishGrazing']['kernel_Z'], float)
+    fish_ing = fish_rate * ((kP[:, None] * Pc).sum(0) + (kZ[:, None] * Zc).sum(0))   # fish ingestion (P+Z), per-vol
+    fxq = iv.get('ZooQuadMortality', {}).get('frac_export', 0.0)                     # 0.5 as-built / 0.33 routed
+    fxf = iv.get('FishGrazing', {}).get('frac_export', 1.0)                          # 0.5 routed / 1.0 non-routed pure sink
+    mz  = (M_Z_BULK if m_Z is None else m_Z)
+    r['ExportTotal'] = r.get('Export', 0.0) + fxq * mz * r['Ztot']**2 * de_t + fxf * fish_ing * de_t
+    r['NPP'] = r.get('PP', np.full(len(r['t']), np.nan)) * de_t
     clim = _clim(r, spinup)
+    _k = r['t'] >= spinup * 365.0
+    clim['NPP'] = float(np.nanmean(r['NPP'][_k])); clim['export_total'] = float(np.nanmean(r['ExportTotal'][_k]))
+    clim['pze'] = float(clim['export_total'] / max(clim['NPP'], 1e-12))
     if return_traj:                                  # attach forcing series for diagnostics
         r['FN'] = _build_fourier_func(forcing['fn'], PERIOD, n_harmonics, t_pts=doy)(r['t'])
         r['de'] = _build_fourier_func(forcing['de'], PERIOD, n_harmonics, t_pts=doy)(r['t'])
         r['T'] = _build_fourier_func(forcing['t'], PERIOD, n_harmonics, t_pts=doy)(r['t'])
         return clim, r
     return clim
+
+
+# =============================================================================
+# Pre-flight confirmation — print the EXACT model + resolved params (no run)
+# =============================================================================
+def describe_run(construct, forcing, fish_rate=0.0, mP=None, m_Z=None, grazing=None,
+                 iv_overrides=None, n_harmonics=N_HARMONICS, routed=False,
+                 mu_scale=1.0, graze_scale=1.0, solver_kwargs=SEASONAL_SOLVER_KWARGS):
+    """Build the input-vars exactly as run_one would and PRINT the resolved model, scalars,
+    loss-fate routing, detritus pair, and forcing — WITHOUT running the IVP. Call before a
+    scan to confirm what will actually run. Returns the iv dict for inspection."""
+    spec = allometry(construct) if isinstance(construct, str) else construct
+    builder = make_seasonal_input_vars_routed if routed else make_seasonal_input_vars
+    model_name = 'model_baseline_seasonal_routed' if routed else 'model_baseline_seasonal'
+    doy = forcing.get('doy')
+    mu = np.asarray(spec['mu_max'], float) * mu_scale
+    iv = builder(forcing['fn'], forcing['de'], forcing['t'], fish_rate=fish_rate,
+                 mu_max=mu, halfsat=spec['halfsat'],
+                 mP=(M_P if mP is None else mP), m_Z=(M_Z_BULK if m_Z is None else m_Z),
+                 n_harmonics=n_harmonics, doy=doy)
+    if grazing:
+        iv['Grazing'].update(grazing)
+    for slot, d in (iv_overrides or {}).items():
+        iv[slot].update(d)
+    if graze_scale != 1.0:
+        iv['Grazing']['Imax'] = np.asarray(iv['Grazing']['Imax'], float) * graze_scale
+
+    def gv(slot, key, default='—'):
+        return iv.get(slot, {}).get(key, default)
+    def route(slot):
+        fD, fX = gv(slot, 'frac_D', None), gv(slot, 'frac_export', None)
+        if fD is None:
+            return 'export 100% (pure sink)' if slot == 'FishGrazing' else 'n/a'
+        return f"N {1 - fD - fX:.2f} / D {fD:.2f} / export {fX:.2f}"
+
+    ws, kr = float(gv('DetritusSink', 'w_sink')), float(gv('DetritusRemin', 'k_remin'))
+    dd = np.asarray(doy, float) if doy is not None else None
+    print("=" * 66)
+    print(f"  MODEL   : {model_name}   {'(ROUTED closure+fish)' if routed else '(standard)'}")
+    print(f"  growth  : {spec.get('name', '?')}  mu_max[{mu.min():.2f}-{mu.max():.2f}]  "
+          f"Ks[{np.min(spec['halfsat']):.2f}-{np.max(spec['halfsat']):.2f}]"
+          + (f"  x mu_scale {mu_scale}" if mu_scale != 1.0 else ""))
+    print(f"  grazing : KsZ {gv('Grazing','KsZ')}  sigma_log {gv('Grazing','sigma_log')}  Q10 {gv('Grazing','q10')}"
+          + (f"  x graze_scale {graze_scale}" if graze_scale != 1.0 else ""))
+    print(f"  scalars : GGE {gv('GrazingRouter','gge')}  growth-Q10 {gv('Growth','q10')}  T_ref {gv('Growth','t_ref')}")
+    print(f"  rates   : mP {gv('PhytoMortality','rate')}  m_Z(quad) {gv('ZooQuadMortality','rate')}  "
+          f"m_Zlin {gv('ZooLinMortality','rate')}  r_F {gv('FishGrazing','rate')}")
+    print(f"  detritus: k_remin {kr}  w_sink {ws}  ->  L = {ws/max(kr,1e-9):.0f} m")
+    print("  loss-fate routing (N / D / export):")
+    print(f"     phyto mort : {route('PhytoMortality')}")
+    print(f"     graze unas : {route('GrazingRouter')}")
+    print(f"     zoo linear : {route('ZooLinMortality')}")
+    print(f"     zoo quad   : {route('ZooQuadMortality')}")
+    print(f"     fish       : {route('FishGrazing')}")
+    print(f"  forcing : n_harmonics {n_harmonics}  fit @ {'cruise DOY' if (dd is not None and np.isfinite(dd).any()) else 'mid-month'}  "
+          f"| F_N[{np.nanmin(forcing['fn']):.2f}-{np.nanmax(forcing['fn']):.2f}]  "
+          f"d_e[{np.nanmin(forcing['de']):.0f}-{np.nanmax(forcing['de']):.0f}]  T[{np.nanmin(forcing['t']):.1f}-{np.nanmax(forcing['t']):.1f}]")
+    print(f"  solver  : {solver_kwargs}")
+    print("=" * 66)
+    return iv
 
 
 # =============================================================================
@@ -377,7 +458,7 @@ def run_seasonal_scan(constructs=DEFAULT_CONSTRUCTS,
                       save_path='seasonal_scan_results.pkl', progress=True,
                       processes=None,
                       maxtasksperchild=1, forcings=None, n_harmonics=N_HARMONICS,
-                      param_combos=None):
+                      param_combos=None, routed=False, describe=True):
     """Cartesian product (construct x group x fish x param_grid) of seasonal IVPs,
     run in parallel across `processes` workers (default os.cpu_count()-1).
     `param_grid` = {param: [values]} where param in {'mP','m_Z','KsZ','sigma_log'}.
@@ -409,7 +490,8 @@ def run_seasonal_scan(constructs=DEFAULT_CONSTRUCTS,
                     spinup=spinup, mP=p.get('mP'), m_Z=p.get('m_Z'),
                     iv_overrides=(ivo or None), solver_kwargs=solver_kwargs,
                     n_harmonics=n_harmonics,
-                    mu_scale=p.get('mu_scale', 1.0), graze_scale=p.get('graze_scale', 1.0))
+                    mu_scale=p.get('mu_scale', 1.0), graze_scale=p.get('graze_scale', 1.0),
+                    routed=routed)
 
     tasks = [(_kwargs(s, g, f, p),) for (s, g, f, p) in combos]   # 1-tuple per task
 
@@ -417,6 +499,13 @@ def run_seasonal_scan(constructs=DEFAULT_CONSTRUCTS,
     print(f"[seasonal scan] {n} runs: {[s['name'] for s in specs]} x {list(groups)} x "
           f"fish={list(fish_rates)} x params{pnames or '[]'} | {years} yr each (spin-up {spinup})")
     print(f"solver: {solver_kwargs} | fourier n_harm={n_harmonics} | processes={processes or 'cpu-1'}")
+    if describe and combos:                          # confirm the EXACT resolved first-combo config (2026-06-28)
+        kk = _kwargs(*combos[0])
+        describe_run(kk['construct'], kk['forcing'], fish_rate=kk['fish_rate'],
+                     mP=kk['mP'], m_Z=kk['m_Z'], iv_overrides=kk['iv_overrides'],
+                     n_harmonics=kk['n_harmonics'], routed=kk['routed'],
+                     mu_scale=kk['mu_scale'], graze_scale=kk['graze_scale'],
+                     solver_kwargs=solver_kwargs)
 
     records = []
 
