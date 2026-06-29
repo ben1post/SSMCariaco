@@ -287,6 +287,7 @@ def _clim(r, spinup_yr):
             s[k] = s[k + '_med'] = s[k + '_sd'] = np.nan
             s['clim_' + k] = np.full(12, np.nan)
         s['Z200_peak'] = s['cv_sumP'] = s['mcs_conv'] = s['minP'] = s['minZ'] = np.nan
+        s['squiggle_sumP'] = s['squiggle_micro'] = np.nan
         return s
     mo = np.clip(np.searchsorted(_MEDGES, np.mod(r['t'][keep], 365.0), 'right') + 1, 1, 12)
     yr = (r['t'][keep] // 365.0).astype(int)
@@ -306,6 +307,19 @@ def _clim(r, spinup_yr):
     s['minZ'] = float(np.nanmin(r['minZ'][keep])) if 'minZ' in r else np.nan
     am = np.array([np.nanmean(r['mcs'][keep][yr == y]) for y in ys])
     s['mcs_conv'] = float(np.nanmean(am[half:]) / max(np.nanmean(am[:half]), 1e-12))
+    # interannual cycle spread ("squiggle"): mean over months of [SD across years of that
+    # month's mean] / overall mean -- the fan-out width of the yearly cycles (added 2026-06-29)
+    def _ia_spread(v):
+        M = np.full((len(ys), 12), np.nan)
+        for i, y in enumerate(ys):
+            vy, moy = v[yr == y], mo[yr == y]
+            for m in range(1, 13):
+                sel = vy[moy == m]
+                if sel.size:
+                    M[i, m - 1] = np.nanmean(sel)
+        return float(np.nanmean(np.nanstd(M, axis=0)) / max(np.nanmean(v), 1e-12))
+    for _k in ('sumP', 'micro'):
+        s['squiggle_' + _k] = _ia_spread(r[_k][keep]) if _k in r else np.nan
     return s
 
 
