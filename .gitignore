@@ -163,3 +163,4 @@ cython_debug/
 plots/results/fig5_alpha_sinusoidal_50x50_2026-06-26.nc
 parameter_scan/FINAL/traj_cache.pkl
 parameter_scan/FINAL/results/fig5_alpha_sinusoidal_50x50_A_2026-06-29.nc
+plots/results/fig5_alpha_sinusoidal_50x50_A_2026-06-29.nc
