@@ -3,9 +3,9 @@ fig4_panels.py -- standalone candidate sub-panels for MS3 Figure 4.
 
 Each `panel_*` draws into a supplied `ax` (so they compose into the final layout
 later); styling follows Figures 1/3 (era colours, white-halo trio, in-ticks, log-µm
-mcs axis, square panels). Model = the settled construct D:
-    maranon_ward | GGE 0.31, mP 0.0015, m_Z 0.10, KsZ 0.23, sigma_log 0.20
-    graded fish: pre+recovery r_F 0.4 / post r_F 0.0
+mcs axis, square panels). Model = the frozen routed construct A:
+    maranon_ward | GGE 0.25, mP 0.0015, m_Z 0.10, KsZ 0.15, sigma_log 0.20 (routed closure)
+    graded fish: pre+recovery r_F 0.55 / post r_F 0.10
 Run THREAD-PINNED (chaotic model -- keep the 1-thread header active in the notebook).
 
 In the notebook, set retina FIRST (it's an IPython magic, can't live here):
@@ -33,12 +33,12 @@ import seasonal_scan_harness as ssh
 
 # ---------------------------------------------------------------- settled construct
 CONSTRUCT = 'maranon_ward'
-PARAMS    = dict(GGE=0.31, mP=0.0015, m_Z=0.10, KsZ=0.23, sigma_log=0.20)
-# Per-era fish rates, updated 2026-06-25 from the 61-pt r_F sweep. Pre+rec at 0.5
-# sits in the score-best plateau (score 0.154 vs the prior 0.4's 0.209). Post at
-# 0.1 sits in the post-era score valley (0.170) and addresses the biological
-# defensibility of the prior 0.0 (sardines were REDUCED, not absent, post-collapse).
-ERAS      = {'pre+recovery': 0.5, 'post': 0.1}
+PARAMS    = dict(GGE=0.25, mP=0.0015, m_Z=0.10, KsZ=0.15, sigma_log=0.20)
+# Per-era fish rates for the frozen routed construct A (2026-06-29): pre+rec 0.55 /
+# post 0.10 -- graded (sardines reduced ~75%, not absent, post-collapse). r_F is
+# calibrated; full construct + provenance in the frozen construct-A summary.
+# (NB: the routing/detritus/fish-closure params live in _run below, not in PARAMS.)
+ERAS      = {'pre+recovery': 0.55, 'post': 0.1}
 # Tight RK45 defaults (atol=1e-9, rtol=1e-6, max_step=1.0, floor=-1e-3) inherited
 # from seasonal_scan_harness.SEASONAL_SOLVER_KWARGS. The earlier legacy override
 # (`instability_neg_threshold=-1e-2`) is no longer needed — scipy#10070 + tight
@@ -88,8 +88,12 @@ def _run(forc_era, fish):
     return ssh.run_one(ssh.allometry(CONSTRUCT), forc_era, fish_rate=fish, years=60, spinup=15,
                        mP=PARAMS['mP'], m_Z=PARAMS['m_Z'],
                        grazing={'KsZ': PARAMS['KsZ'], 'sigma_log': PARAMS['sigma_log']},
-                       iv_overrides={'GrazingRouter': {'gge': PARAMS['GGE']}},
-                       solver_kwargs=SK, return_traj=True)
+                       iv_overrides={'GrazingRouter': {'gge': PARAMS['GGE']},
+                                     'FishGrazing': {'frac_D': 0.25, 'frac_export': 0.25},
+                                     'DetritusSink': {'w_sink': 5.0}, 'DetritusRemin': {'k_remin': 0.067},
+                                     'ZooQuadMortality': {'frac_D': 0.90, 'frac_export': 0.0},
+                                     'ZooLinMortality': {'frac_D': 0.90, 'frac_export': 0.0}},
+                       n_harmonics=3, routed=True, solver_kwargs=SK, return_traj=True)
 
 
 def prep(regimes=None, forcing_complete=True, eras=None):
